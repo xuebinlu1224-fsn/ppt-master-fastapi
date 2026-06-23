@@ -1,0 +1,1384 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ppt-master-agent Console</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --panel: #fffdf8;
+      --line: #d8cfbf;
+      --text: #1f1d19;
+      --muted: #4a4438;
+      --accent: #0b6e4f;
+      --accent-2: #c46b2d;
+      --danger: #a93226;
+      --danger-soft: #fbecea;
+      --ok: #1d6f3a;
+      --ok-soft: #e6f4ec;
+      --warn: #8a5a00;
+      --warn-soft: #fbf2dc;
+      --code-bg: #171612;
+      --code-fg: #f4efe6;
+      --shadow: 0 18px 40px rgba(31, 29, 25, 0.08);
+      --radius: 18px;
+      --focus-ring: 0 0 0 2px rgba(11, 110, 79, 0.45);
+    }
+    [data-theme="dark"] {
+      --bg: #16140f;
+      --panel: #1f1c16;
+      --line: #2f2a22;
+      --text: #f0ead8;
+      --muted: #a89e88;
+      --accent: #5fc59c;
+      --accent-2: #e0a268;
+      --danger: #e98980;
+      --danger-soft: #2a1614;
+      --ok: #5fc59c;
+      --ok-soft: #14241c;
+      --warn: #d6a14d;
+      --warn-soft: #2a1f10;
+      --code-bg: #0d0c0a;
+      --code-fg: #f0ead8;
+      --shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+      --focus-ring: 0 0 0 2px rgba(95, 197, 156, 0.55);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(196,107,45,0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(11,110,79,0.14), transparent 22%),
+        linear-gradient(180deg, color-mix(in srgb, var(--bg) 96%, #fff 4%) 0%, var(--bg) 100%);
+      transition: background 200ms ease, color 200ms ease;
+    }
+    .wrap {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 28px auto 40px;
+    }
+    .hero {
+      padding: 28px 30px;
+      background: linear-gradient(135deg, rgba(11,110,79,0.95), rgba(14,55,42,0.95));
+      color: #f8f4ed;
+      border-radius: 26px;
+      box-shadow: var(--shadow);
+      margin-bottom: 22px;
+      display: flex;
+      align-items: flex-start;
+      gap: 20px;
+    }
+    .hero-body { flex: 1 1 auto; }
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: 34px;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 840px;
+      color: rgba(248, 244, 237, 0.84);
+      line-height: 1.6;
+    }
+    .hero-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+      flex-shrink: 0;
+    }
+    .hero-actions a, .hero-actions button {
+      color: rgba(248, 244, 237, 0.86);
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .hero-actions a:hover, .hero-actions button:hover {
+      background: rgba(255,255,255,0.16);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .card {
+      grid-column: span 12;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 20px;
+      box-shadow: var(--shadow);
+    }
+    .card.half { grid-column: span 6; }
+    .card.third { grid-column: span 4; }
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 19px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card h2 .step {
+      display: inline-flex;
+      width: 24px; height: 24px;
+      align-items: center; justify-content: center;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+      margin-top: -6px;
+      margin-bottom: 14px;
+    }
+    .hint code, .hint kbd {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1px 6px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+    label {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 11px 12px;
+      font: inherit;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+    input:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: var(--focus-ring);
+    }
+    input:disabled, textarea:disabled, select:disabled {
+      background: color-mix(in srgb, var(--panel) 60%, var(--bg) 40%);
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.7;
+    }
+    .field.is-locked {
+      opacity: 0.7;
+    }
+    .field.is-locked > label::after {
+      content: " · 已锁定";
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 11px;
+    }
+    .lock-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 8px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      cursor: pointer;
+    }
+    .lock-toggle:hover { color: var(--accent); border-color: var(--accent); }
+    .locked-section-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 12px;
+      margin-bottom: 12px;
+      border-radius: 10px;
+      background: var(--warn-soft);
+      color: var(--warn);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .locked-section-banner button {
+      background: transparent;
+      color: var(--warn);
+      padding: 3px 10px;
+      font-size: 11px;
+      border: 1px solid currentColor;
+    }
+    .field.is-invalid input,
+    .field.is-invalid textarea,
+    .field.is-invalid select {
+      border-color: var(--danger);
+      box-shadow: 0 0 0 2px rgba(169, 50, 38, 0.18);
+    }
+    .field-error {
+      color: var(--danger);
+      font-size: 12px;
+      min-height: 14px;
+    }
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      color: #fff;
+      background: var(--accent);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+    button:hover:not(:disabled) { opacity: 0.92; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.secondary { background: var(--accent-2); }
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+    button.danger { background: var(--danger); }
+    .status {
+      white-space: pre-wrap;
+      background: var(--code-bg);
+      color: var(--code-fg);
+      border-radius: 16px;
+      padding: 16px;
+      min-height: 200px;
+      max-height: 480px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      overflow: auto;
+    }
+    .status-banner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .status-banner.is-ok { background: var(--ok-soft); color: var(--ok); }
+    .status-banner.is-error { background: var(--danger-soft); color: var(--danger); }
+    .status-banner.is-warn { background: var(--warn-soft); color: var(--warn); }
+    .status-banner.is-busy { background: var(--warn-soft); color: var(--warn); }
+    .status-banner button {
+      background: transparent;
+      color: inherit;
+      padding: 4px 8px;
+      font-size: 12px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+    }
+    .pillbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .gallery-item {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+    }
+    .gallery-item .name {
+      word-break: break-all;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .gallery-item .meta {
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .gallery-empty {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 10px 0;
+    }
+    .history-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
+      font-size: 12px;
+    }
+    .history-row:last-child { border-bottom: 0; }
+    .history-row .ts { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .history-row .label { font-weight: 600; }
+    .history-row .ok { color: var(--ok); }
+    .history-row .err { color: var(--danger); }
+    .history-row button {
+      padding: 3px 8px;
+      font-size: 11px;
+      margin-left: auto;
+    }
+    .hidden { display: none !important; }
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 900px) {
+      .card.half, .card.third { grid-column: span 12; }
+      .fields { grid-template-columns: 1fr; }
+      .hero { flex-direction: column; }
+      .hero-actions { flex-direction: row; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="hero-body">
+        <h1>ppt-master 外层链路控制台</h1>
+        <p>本地验证台。填任务参数、八项确认、图片参数和导出参数,直接调用当前 FastAPI 服务,验证从任务准备到导出 PPT 的整条链路。</p>
+      </div>
+      <div class="hero-actions">
+        <button id="themeToggle" type="button" aria-label="切换主题">🌙</button>
+        <a id="clearLocalLink" href="#" role="button">清除本地记忆</a>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2><span class="step">1</span>任务基础参数</h2>
+        <div class="hint">先准备一个 <code>ppt-master</code> 任务工程。</div>
+        <div class="fields">
+          <div class="field">
+            <label for="canvasFormat">canvas_format</label>
+            <select id="canvasFormat">
+              <option value="ppt169">ppt169 — PPT 16:9 (1280×720)</option>
+              <option value="ppt43">ppt43 — PPT 4:3 (1024×768)</option>
+              <option value="wechat">wechat — 微信公众号头图 (900×383)</option>
+              <option value="xiaohongshu">xiaohongshu — 小红书 (1242×1660)</option>
+              <option value="moments">moments — 朋友圈 / Instagram (1080×1080)</option>
+              <option value="story">story — Story / 竖屏 (1080×1920)</option>
+              <option value="banner">banner — 横版 banner (1920×1080)</option>
+              <option value="a4">a4 — A4 印刷 (1240×1754)</option>
+            </select>
+            <div class="field-error" id="canvasFormatError"></div>
+          </div>
+          <div class="field full">
+            <label for="prompt">主任务 prompt</label>
+            <textarea id="prompt">请基于这份材料生成一份 10 页、16:9、适合融资路演的可编辑 PPT。
+主题:AI 编程助手,目标受众:一线 VC 的合伙人,
+要求:开篇讲清痛点、中段展示产品 Demo、结尾给出融资计划与里程碑。</textarea>
+            <div class="field-error" id="promptError"></div>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="prepareBtn">准备任务</button>
+          <button class="secondary" id="runPrepareConfirmPlanBtn">一键执行:准备 + 确认 + 规划</button>
+          <button class="secondary" id="runImageExportBtn">一键执行:生图 + 导出</button>
+          <button class="ghost" id="loadTaskBtn">读取任务状态</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2><span class="step">2</span>参数确认数据 (Strategist 八项确认)</h2>
+        <div class="hint">保存为 <code>confirmation_data.json</code>。一键执行类流水线会读取它来驱动后续环节。</div>
+        <div class="locked-section-banner" data-lock-section="confirmation">
+          <span>非必填项已锁定并填好默认值,如有需要可手动解锁</span>
+          <button type="button" data-action="unlock-section">解锁全部</button>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label for="pageCount">页数范围</label>
+            <input id="pageCount" placeholder="例如 8-12 页" value="8-12 页" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="audience">目标受众</label>
+            <input id="audience" placeholder="投资人 / 管理层 / 客户" value="投资人" data-lock="true" />
+          </div>
+          <div class="field full">
+            <label for="styleObjective">风格目标</label>
+            <textarea id="styleObjective" placeholder="例如:高级、克制、信息密度高,偏咨询风。" data-lock="true">高级、克制、信息密度高,偏咨询风。</textarea>
+          </div>
+          <div class="field">
+            <label for="colorScheme">配色方案</label>
+            <input id="colorScheme" placeholder="例如:深绿 + 米白 + 橙色点缀" value="深绿 + 米白 + 橙色点缀" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="iconUsage">图标策略</label>
+            <input id="iconUsage" placeholder="例如:tabler-outline / 极少量使用" value="tabler-outline / 极少量使用" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="typographyPlan">字体策略</label>
+            <input id="typographyPlan" placeholder="例如:标题思源黑体,正文苹方" value="标题思源黑体,正文苹方" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="formulaPolicy">公式策略</label>
+            <select id="formulaPolicy" data-lock="true">
+              <option value="mixed">mixed</option>
+              <option value="render-all">render-all</option>
+              <option value="text-only">text-only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="imageUsage">图片策略</label>
+            <select id="imageUsage" data-lock="true">
+              <option value="ai">ai</option>
+              <option value="web">web</option>
+              <option value="provided">provided</option>
+              <option value="placeholder">placeholder</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="imageAiPath">AI 图片路径偏好</label>
+            <select id="imageAiPath" data-lock="true">
+              <option value="api">api</option>
+              <option value="host-native">host-native</option>
+              <option value="manual">manual</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="generationMode">生成模式</label>
+            <select id="generationMode" data-lock="true">
+              <option value="continuous">continuous</option>
+              <option value="split">split</option>
+            </select>
+          </div>
+          <div class="field full">
+            <label for="contentDivergence">内容改写边界</label>
+            <textarea id="contentDivergence" placeholder="例如:事实保持准确,但结构可重组,允许合并/拆分页面。" data-lock="true">事实保持准确,但结构可重组,允许合并/拆分页面。</textarea>
+          </div>
+          <div class="field full">
+            <label for="notes">附加说明 (notes,可选)</label>
+            <textarea id="notes" placeholder="例如:本场面向二级市场分析师,语言偏稳健。" data-lock="true"></textarea>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="saveConfirmBtn">保存确认数据</button>
+          <button class="ghost" id="loadConfirmBtn">读取确认数据(并回填表单)</button>
+        </div>
+      </section>
+
+      <section class="card half">
+        <h2><span class="step">3</span>DeepSeek 规划</h2>
+        <div class="fields">
+          <div class="field">
+            <label for="planModel">DeepSeek 模型</label>
+            <input id="planModel" value="deepseek-v4-pro" />
+          </div>
+          <div class="field full">
+            <label for="extraInstructions">额外规划说明</label>
+            <textarea id="extraInstructions" placeholder="例如:先判断是否具备导出条件;如果没有,列出还缺哪些关键文件。" data-lock="true"></textarea>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="planBtn">生成规划</button>
+        </div>
+      </section>
+
+      <section class="card half">
+        <h2><span class="step">4</span>图片生成</h2>
+        <div class="fields">
+          <div class="field">
+            <label for="imageMode">模式</label>
+            <select id="imageMode">
+              <option value="prompt">单图 prompt</option>
+              <option value="manifest">manifest</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="imageBackend">backend (可选)</label>
+            <input id="imageBackend" placeholder="agnes / openai / gemini / …" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="imageModel">模型 (可选)</label>
+            <input id="imageModel" placeholder="例如 agnes-image-2.1-flash" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="imageConcurrency">并发 (可选)</label>
+            <input id="imageConcurrency" type="number" min="1" max="8" placeholder="1" data-lock="true" />
+          </div>
+          <div class="field full">
+            <label for="imagePrompt">单图 prompt</label>
+            <textarea id="imagePrompt" placeholder="未来感 AI 商业汇报封面插画">未来感 AI 商业汇报封面插画</textarea>
+          </div>
+          <div class="field full">
+            <label for="manifestPath">manifest_path</label>
+            <input id="manifestPath" placeholder="projects/TASK_ID/images/image_prompts.json" value="projects/TASK_ID/images/image_prompts.json" />
+          </div>
+          <div class="field">
+            <label for="aspectRatio">aspect_ratio</label>
+            <select id="aspectRatio">
+              <option value="16:9">16:9</option>
+              <option value="1:1">1:1</option>
+              <option value="1:4">1:4</option>
+              <option value="1:8">1:8</option>
+              <option value="2:3">2:3</option>
+              <option value="3:2">3:2</option>
+              <option value="3:4">3:4</option>
+              <option value="4:1">4:1</option>
+              <option value="4:3">4:3</option>
+              <option value="4:5">4:5</option>
+              <option value="5:4">5:4</option>
+              <option value="8:1">8:1</option>
+              <option value="9:16">9:16</option>
+              <option value="21:9">21:9</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="imageSize">image_size</label>
+            <select id="imageSize">
+              <option value="1K">1K</option>
+              <option value="512px">512px</option>
+              <option value="2K">2K</option>
+              <option value="4K">4K</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="filename">filename</label>
+            <input id="filename" placeholder="cover_visual" data-lock="true" />
+          </div>
+          <div class="field">
+            <label for="outputDir">output_dir (可选)</label>
+            <input id="outputDir" placeholder="projects/TASK_ID/images" data-lock="true" />
+          </div>
+        </div>
+        <div class="actions">
+          <button id="imageBtn">调用生图</button>
+        </div>
+      </section>
+
+      <section class="card half">
+        <h2><span class="step">5</span>导出参数</h2>
+        <div class="fields">
+          <div class="field">
+            <label for="exportSource">svg source</label>
+            <select id="exportSource" data-lock="true">
+              <option value="">默认</option>
+              <option value="output">output</option>
+              <option value="final">final</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="svgSnapshot">svg_snapshot</label>
+            <select id="svgSnapshot" data-lock="true">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="noMerge">no_merge</label>
+            <select id="noMerge" data-lock="true">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="exportBtn">执行导出</button>
+          <button class="ghost" id="fullRunBtn">一键执行:准备到导出</button>
+        </div>
+      </section>
+
+      <section class="card half">
+        <h2><span class="step">6</span>任务产物</h2>
+        <div class="actions">
+          <button class="ghost" id="artifactsBtn">读取产物摘要</button>
+          <button class="ghost" id="runLogBtn">读取 run_log</button>
+          <button class="ghost" id="planFileBtn">读取 plan 文件</button>
+          <button class="ghost" id="confirmFileBtn">读取 confirmation 文件</button>
+        </div>
+        <div id="galleryContainer" class="hidden">
+          <div class="hint" style="margin-top: 14px">产物画廊 (本地开发可点击,Docker 模式下需要 <code>docker cp</code> 拉出来):</div>
+          <div id="exportsGallery" class="gallery"></div>
+          <div class="hint" style="margin-top: 12px">图片:</div>
+          <div id="imagesGallery" class="gallery"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="pillbar">
+          <div class="pill">服务:<span id="originTag"></span></div>
+          <div class="pill">task_id:<span id="taskTag">未设置</span></div>
+          <div class="pill">project_dir:<span id="projectDirTag">未创建</span></div>
+          <div class="pill" id="busyPill" style="display:none"><span class="spinner"></span><span id="busyLabel">处理中</span></div>
+        </div>
+        <div id="bannerSlot"></div>
+        <div class="status" id="statusBox">等待操作...</div>
+        <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
+          <div class="hint" style="margin:0">最近 8 次调用:</div>
+          <button class="ghost" type="button" id="clearHistoryBtn" style="padding: 6px 12px; font-size: 12px;">清空历史</button>
+        </div>
+        <div id="historyList"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+
+    const $ = (id) => document.getElementById(id);
+
+    // ---------- constants ----------
+    const REPO_DIR = "/app/ppt-master";
+
+    // ---------- persisted state (localStorage) ----------
+    const STORAGE_KEYS = {
+      theme: "pma.theme",
+    };
+
+    function loadStored() {
+      try {
+        const stored = {};
+        for (const [k, v] of Object.entries(STORAGE_KEYS)) {
+          stored[k] = localStorage.getItem(v);
+        }
+        return stored;
+      } catch {
+        return {};
+      }
+    }
+
+    function saveStored(key, value) {
+      try {
+        if (value === null || value === undefined || value === "") {
+          localStorage.removeItem(STORAGE_KEYS[key]);
+        } else {
+          localStorage.setItem(STORAGE_KEYS[key], value);
+        }
+      } catch { /* localStorage disabled, ignore */ }
+    }
+
+    function clearStored() {
+      try {
+        for (const k of Object.values(STORAGE_KEYS)) {
+          localStorage.removeItem(k);
+        }
+      } catch { /* ignore */ }
+    }
+
+    // ---------- session state (per-page-load) ----------
+    const state = { taskId: null };
+    function currentTaskId() {
+      const value = state.taskId || "";
+      const tag = $("taskTag");
+      if (tag) tag.textContent = value || "未设置";
+      return value;
+    }
+
+    // ---------- theme ----------
+    function applyTheme(theme) {
+      const t = theme === "dark" ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+      $("themeToggle").textContent = t === "dark" ? "☀" : "🌙";
+      saveStored("theme", t);
+    }
+
+    function initTheme() {
+      let theme;
+      try {
+        theme = localStorage.getItem(STORAGE_KEYS.theme);
+      } catch { theme = null; }
+      if (theme !== "light" && theme !== "dark") {
+        theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+      }
+      applyTheme(theme);
+    }
+
+    // ---------- busy / loading state ----------
+    let inFlight = 0;
+    let busyTimer = null;
+    function bumpBusy(label) {
+      inFlight += 1;
+      renderBusy();
+      if (busyTimer) { clearTimeout(busyTimer); busyTimer = null; }
+      if (label) {
+        $("busyLabel").textContent = label;
+      }
+    }
+    function releaseBusy() {
+      inFlight = Math.max(0, inFlight - 1);
+      renderBusy();
+    }
+    function renderBusy() {
+      const isBusy = inFlight > 0;
+      $("busyPill").style.display = isBusy ? "inline-flex" : "none";
+      // disable every button
+      for (const btn of document.querySelectorAll("button")) {
+        if (btn.id === "themeToggle" || btn.id === "clearLocalLink") continue;
+        btn.disabled = isBusy;
+      }
+    }
+    function delayedBusyHide() {
+      // debounce so a quick succession of calls doesn't flicker
+      if (busyTimer) clearTimeout(busyTimer);
+      busyTimer = setTimeout(() => {
+        inFlight = 0;
+        renderBusy();
+      }, 200);
+    }
+
+    // ---------- history ----------
+    const HISTORY_MAX = 8;
+    const history = [];
+    function recordHistory({ label, ok, summary }) {
+      history.unshift({
+        ts: new Date(),
+        label,
+        ok,
+        summary: summary || "",
+      });
+      while (history.length > HISTORY_MAX) history.pop();
+      renderHistory();
+    }
+    function renderHistory() {
+      const root = $("historyList");
+      if (history.length === 0) {
+        root.innerHTML = '<div class="gallery-empty">暂无记录</div>';
+        return;
+      }
+      root.innerHTML = history
+        .map((h, i) => {
+          const ts = h.ts.toLocaleTimeString();
+          const status = h.ok ? "ok" : "err";
+          const statusText = h.ok ? "OK" : "ERR";
+          return `<div class="history-row" data-idx="${i}">
+            <span class="ts">${ts}</span>
+            <span class="label">${escapeHtml(h.label)}</span>
+            <span class="${status}">${statusText}</span>
+            <span style="color: var(--muted); flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(h.summary)}</span>
+            <button type="button" data-action="show">查看</button>
+          </div>`;
+        })
+        .join("");
+    }
+    function showHistoryEntry(idx) {
+      const entry = history[idx];
+      if (!entry) return;
+      showResponse(entry.label, entry.payload || entry.summary, entry.ok);
+    }
+
+    // ---------- status / banner / panel ----------
+    let lastPayload = null;
+    function escapeHtml(s) {
+      return String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function setBanner({ kind, message, detail }) {
+      const slot = $("bannerSlot");
+      if (!kind) {
+        slot.innerHTML = "";
+        return;
+      }
+      const cls = kind === "ok" ? "is-ok" : kind === "error" ? "is-error" : kind === "busy" ? "is-busy" : "is-warn";
+      const text = escapeHtml(message || "");
+      const detailButton = detail
+        ? `<button type="button" data-action="toggle-detail">查看详情</button>`
+        : "";
+      slot.innerHTML = `<div class="status-banner ${cls}" data-has-detail="${detail ? "1" : ""}">
+        <span>${text}</span>
+        <span style="flex:1 1 auto"></span>
+        ${detailButton}
+      </div>${detail ? `<pre class="status hidden" data-detail style="margin-top:-6px;">${escapeHtml(JSON.stringify(detail, null, 2))}</pre>` : ""}`;
+      if (detail) {
+        const banner = slot.querySelector(".status-banner");
+        const detailEl = slot.querySelector('[data-detail]');
+        banner.querySelector('[data-action="toggle-detail"]').addEventListener("click", () => {
+          detailEl.classList.toggle("hidden");
+        });
+      }
+    }
+
+    function setStatusText(text) {
+      $("statusBox").textContent = text || "";
+    }
+
+    function setStatus(title, data) {
+      const body = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+      setStatusText(`[${new Date().toLocaleTimeString()}] ${title}\n\n${body}`);
+    }
+
+    function showResponse(label, payload, ok) {
+      const status = ok ? "ok" : "error";
+      setBanner({
+        kind: status,
+        message: `${label}: ${ok ? "成功" : "失败"}`,
+        detail: payload,
+      });
+      setStatus(label, payload);
+      lastPayload = payload;
+    }
+
+    // ---------- validation ----------
+    function clearFieldError(id) {
+      const el = $(id);
+      const field = el.closest(".field");
+      if (field) field.classList.remove("is-invalid");
+      const errEl = $(id + "Error");
+      if (errEl) errEl.textContent = "";
+    }
+    function setFieldError(id, message) {
+      const el = $(id);
+      const field = el.closest(".field");
+      if (field) field.classList.add("is-invalid");
+      const errEl = $(id + "Error");
+      if (errEl) errEl.textContent = message;
+    }
+    function clearAllFieldErrors() {
+      for (const id of [
+        "canvasFormat", "prompt", "imagePrompt", "manifestPath", "aspectRatio",
+      ]) {
+        clearFieldError(id);
+      }
+    }
+
+    function requireNonEmpty(id, label) {
+      const v = $(id).value.trim();
+      if (!v) {
+        setFieldError(id, `${label} 不能为空`);
+        return false;
+      }
+      return true;
+    }
+
+    // ---------- API helpers ----------
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options,
+      });
+      const text = await response.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = text;
+      }
+      if (!response.ok) {
+        const err = new Error(typeof data === "string" ? data : JSON.stringify(data, null, 2));
+        err.status = response.status;
+        err.payload = data;
+        throw err;
+      }
+      return data;
+    }
+
+    // ---------- build payloads ----------
+    function buildPreparePayload() {
+      return {
+        repo_dir: REPO_DIR,
+        prompt: $("prompt").value.trim(),
+        canvas_format: $("canvasFormat").value,
+      };
+    }
+
+    function buildConfirmationPayload() {
+      const payload = {
+        page_count_range: $("pageCount").value.trim(),
+        target_audience: $("audience").value.trim(),
+        style_objective: $("styleObjective").value.trim(),
+        color_scheme: $("colorScheme").value.trim(),
+        icon_usage: $("iconUsage").value.trim(),
+        typography_plan: $("typographyPlan").value.trim(),
+        formula_policy: $("formulaPolicy").value,
+        image_usage: $("imageUsage").value,
+        image_ai_path: $("imageAiPath").value,
+        generation_mode: $("generationMode").value,
+        content_divergence: $("contentDivergence").value.trim(),
+      };
+      const notes = $("notes").value.trim();
+      if (notes) payload.notes = notes;
+      return payload;
+    }
+
+    function applyConfirmationToForm(payload) {
+      const p = payload || {};
+      const set = (id, key) => { const el = $(id); if (el) el.value = p[key] ?? ""; };
+      set("pageCount", "page_count_range");
+      set("audience", "target_audience");
+      set("styleObjective", "style_objective");
+      set("colorScheme", "color_scheme");
+      set("iconUsage", "icon_usage");
+      set("typographyPlan", "typography_plan");
+      set("formulaPolicy", "formula_policy");
+      set("imageUsage", "image_usage");
+      set("imageAiPath", "image_ai_path");
+      set("generationMode", "generation_mode");
+      set("contentDivergence", "content_divergence");
+      set("notes", "notes");
+    }
+
+    function boolValue(id) {
+      return $(id).value === "true";
+    }
+
+    // ---------- API calls (each bumps busy + records history) ----------
+    async function prepareTask() {
+      clearAllFieldErrors();
+      if (!requireNonEmpty("prompt", "主任务 prompt")) throw new Error("校验未通过");
+      const payload = buildPreparePayload();
+      const data = await requestJson("/tasks/prepare", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      state.taskId = data.task_id;
+      currentTaskId();
+      setProjectDir(data.project_dir);
+      recordHistory({ label: "POST /tasks/prepare", ok: true, summary: data.task_id, payload: data });
+      showResponse("任务已准备", data, true);
+      return data;
+    }
+
+    async function loadTask() {
+      clearAllFieldErrors();
+      const taskId = currentTaskId();
+      if (!taskId) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const repoDir = REPO_DIR;
+      const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}?repo_dir=${encodeURIComponent(repoDir)}`);
+      setProjectDir(data.project_dir);
+      // refill what we can
+      if (data.user_prompt) $("prompt").value = data.user_prompt;
+      recordHistory({ label: "GET /tasks/{id}", ok: true, summary: taskId, payload: data });
+      showResponse("任务状态", data, true);
+      return data;
+    }
+
+    async function saveConfirmation() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}/confirmation`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo_dir: repoDir,
+          task_id: taskId,
+          payload: buildConfirmationPayload(),
+        }),
+      });
+      recordHistory({ label: "POST /tasks/{id}/confirmation", ok: true, summary: taskId, payload: data });
+      showResponse("确认数据已保存", data, true);
+      return data;
+    }
+
+    async function loadConfirmation() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const data = await requestJson(
+        `/tasks/${encodeURIComponent(taskId)}/confirmation?repo_dir=${encodeURIComponent(repoDir)}`
+      );
+      if (data && data.confirmation_data) {
+        unlockSection("confirmation");
+        applyConfirmationToForm(data.confirmation_data);
+      }
+      recordHistory({ label: "GET /tasks/{id}/confirmation", ok: true, summary: taskId, payload: data });
+      showResponse("确认数据已回填", data, true);
+      return data;
+    }
+
+    async function buildPlan() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}/agent-plan`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo_dir: repoDir,
+          task_id: taskId,
+          model: $("planModel").value.trim() || "deepseek-v4-pro",
+          extra_instructions: $("extraInstructions").value.trim() || null,
+        }),
+      });
+      recordHistory({ label: "POST /tasks/{id}/agent-plan", ok: true, summary: taskId, payload: data });
+      showResponse("规划结果", data, true);
+      return data;
+    }
+
+    async function generateImage() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const imageMode = $("imageMode").value;
+      const prompt = $("imagePrompt").value.trim();
+      const manifest = $("manifestPath").value.trim();
+      if (imageMode === "prompt" && !prompt) {
+        setFieldError("imagePrompt", "单图 prompt 不能为空");
+        throw new Error("校验未通过");
+      }
+      if (imageMode === "manifest" && !manifest) {
+        setFieldError("manifestPath", "manifest_path 不能为空");
+        throw new Error("校验未通过");
+      }
+      const payload = {
+        repo_dir: repoDir,
+        task_id: taskId,
+        backend: $("imageBackend").value.trim() || null,
+        output_dir: $("outputDir").value.trim() || null,
+        aspect_ratio: $("aspectRatio").value,
+        image_size: $("imageSize").value,
+        filename: $("filename").value.trim() || null,
+      };
+      const model = $("imageModel").value.trim();
+      if (model) payload.model = model;
+      const concurrency = parseInt($("imageConcurrency").value, 10);
+      if (Number.isFinite(concurrency) && concurrency > 0) payload.concurrency = concurrency;
+      if (imageMode === "prompt") {
+        payload.prompt = prompt;
+      } else {
+        payload.manifest_path = manifest;
+      }
+      const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}/generate-image`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      recordHistory({ label: "POST /tasks/{id}/generate-image", ok: true, summary: taskId, payload: data });
+      showResponse("生图结果", data, true);
+      return data;
+    }
+
+    async function exportTask() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const source = $("exportSource").value || null;
+      const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}/export`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo_dir: repoDir,
+          task_id: taskId,
+          source,
+          svg_snapshot: boolValue("svgSnapshot"),
+          no_merge: boolValue("noMerge"),
+        }),
+      });
+      recordHistory({ label: "POST /tasks/{id}/export", ok: true, summary: taskId, payload: data });
+      showResponse("导出结果", data, true);
+      return data;
+    }
+
+    async function loadArtifacts() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const data = await requestJson(
+        `/tasks/${encodeURIComponent(taskId)}/artifacts?repo_dir=${encodeURIComponent(repoDir)}`
+      );
+      renderGallery(data);
+      recordHistory({ label: "GET /tasks/{id}/artifacts", ok: true, summary: taskId, payload: data });
+      showResponse("任务产物", data, true);
+      return data;
+    }
+
+    async function loadFile(fileKey) {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const data = await requestJson(
+        `/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}?repo_dir=${encodeURIComponent(repoDir)}`
+      );
+      recordHistory({ label: `GET /tasks/{id}/files/${fileKey}`, ok: true, summary: taskId, payload: data });
+      showResponse(`文件读取: ${fileKey}`, data, true);
+      return data;
+    }
+
+    // ---------- gallery ----------
+    function renderGallery(data) {
+      const container = $("galleryContainer");
+      const exportsRoot = $("exportsGallery");
+      const imagesRoot = $("imagesGallery");
+      exportsRoot.innerHTML = "";
+      imagesRoot.innerHTML = "";
+      const exports = (data && data.exports) || [];
+      const images = (data && data.images) || [];
+      if (exports.length === 0 && images.length === 0) {
+        container.classList.add("hidden");
+        return;
+      }
+      container.classList.remove("hidden");
+      if (exports.length === 0) {
+        exportsRoot.innerHTML = '<div class="gallery-empty">暂无导出文件</div>';
+      } else {
+        exports.forEach((path) => {
+          const name = path.split("/").pop();
+          const div = document.createElement("div");
+          div.className = "gallery-item";
+          div.innerHTML = `
+            <div class="name">📦 ${escapeHtml(name)}</div>
+            <div class="meta">${escapeHtml(path)}</div>
+            <a href="file://${escapeHtml(path)}" target="_blank" rel="noopener">下载 (本地打开)</a>
+            <div class="meta">Docker 模式请 <code>docker cp ppt-master-agent:${escapeHtml(path)} ./</code></div>
+          `;
+          exportsRoot.appendChild(div);
+        });
+      }
+      if (images.length === 0) {
+        imagesRoot.innerHTML = '<div class="gallery-empty">暂无图片</div>';
+      } else {
+        images.forEach((path) => {
+          const name = path.split("/").pop();
+          const ext = name.split(".").pop().toLowerCase();
+          const icon = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext)
+            ? "🖼" : ext === "svg" ? "✏️" : "📄";
+          const div = document.createElement("div");
+          div.className = "gallery-item";
+          div.innerHTML = `
+            <div class="name">${icon} ${escapeHtml(name)}</div>
+            <div class="meta">${escapeHtml(path)}</div>
+            <a href="file://${escapeHtml(path)}" target="_blank" rel="noopener">打开</a>
+          `;
+          imagesRoot.appendChild(div);
+        });
+      }
+    }
+
+    // ---------- pill bar ----------
+    function setProjectDir(value) {
+      $("projectDirTag").textContent = value || "未创建";
+    }
+
+    // ---------- pipelines ----------
+    async function runPrepareConfirmPlan() {
+      clearAllFieldErrors();
+      if (!requireNonEmpty("prompt", "主任务 prompt")) throw new Error("校验未通过");
+      const hasAnyConfirm =
+        $("pageCount").value.trim() ||
+        $("audience").value.trim() ||
+        $("styleObjective").value.trim() ||
+        $("colorScheme").value.trim();
+      if (!hasAnyConfirm) {
+        setFieldError("pageCount", "一键执行需要至少填写一项确认数据 (页数/受众/风格/配色)");
+        throw new Error("校验未通过");
+      }
+      const prepared = await prepareTask();
+      await saveConfirmation();
+      await buildPlan();
+      return prepared;
+    }
+
+    async function runImageThenExport() {
+      clearAllFieldErrors();
+      const imageMode = $("imageMode").value;
+      if (imageMode === "prompt" && !$("imagePrompt").value.trim()) {
+        setFieldError("imagePrompt", "请先填写单图 prompt");
+        throw new Error("校验未通过");
+      }
+      if (imageMode === "manifest" && !$("manifestPath").value.trim()) {
+        setFieldError("manifestPath", "请先填写 manifest_path");
+        throw new Error("校验未通过");
+      }
+      await generateImage();
+      await exportTask();
+      await loadArtifacts();
+    }
+
+    async function runFullFlow() {
+      await runPrepareConfirmPlan();
+      await runImageThenExport();
+    }
+
+    // ---------- click binding with busy + error handling ----------
+    async function withBusy(label, fn) {
+      bumpBusy(label);
+      try {
+        return await fn();
+      } catch (err) {
+        const ok = false;
+        const summary = (err && err.message) ? err.message.split("\n")[0].slice(0, 80) : String(err);
+        recordHistory({
+          label,
+          ok,
+          summary,
+          payload: err && err.payload ? err.payload : (err && err.message) ? err.message : null,
+        });
+        setBanner({ kind: "error", message: `${label} 失败`, detail: err.payload || err.message });
+        setStatus(`${label} 失败`, err.payload || err.message);
+        throw err;
+      } finally {
+        releaseBusy();
+        if (inFlight === 0) delayedBusyHide();
+      }
+    }
+
+    function bind(id, label, fn) {
+      $(id).addEventListener("click", () => withBusy(label, fn));
+    }
+
+    // ---------- locked fields (optional, prefilled with defaults) ----------
+    function applyLocks() {
+      for (const el of document.querySelectorAll("[data-lock='true']")) {
+        el.disabled = true;
+        const field = el.closest(".field");
+        if (field) field.classList.add("is-locked");
+      }
+    }
+    function unlockSection(section) {
+      const root = section ? document.querySelector(`[data-lock-section='${section}']`) : null;
+      const scope = root ? root.parentElement : document;
+      for (const el of scope.querySelectorAll("[data-lock='true']")) {
+        el.disabled = false;
+        const field = el.closest(".field");
+        if (field) field.classList.remove("is-locked");
+      }
+      if (root) {
+        const banner = root;
+        banner.innerHTML = "<span>已解锁,可编辑上述字段</span>";
+      }
+    }
+    document.querySelectorAll("[data-lock-section] [data-action='unlock-section']").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const banner = btn.closest("[data-lock-section]");
+        const section = banner ? banner.dataset.lockSection : null;
+        unlockSection(section);
+      });
+    });
+
+    // ---------- bootstrap ----------
+    $("originTag").textContent = window.location.origin;
+    initTheme();
+    const stored = loadStored();
+    currentTaskId();
+    applyLocks();
+
+    $("canvasFormat").addEventListener("change", () => clearFieldError("canvasFormat"));
+    $("imagePrompt").addEventListener("input", () => clearFieldError("imagePrompt"));
+    $("manifestPath").addEventListener("input", () => clearFieldError("manifestPath"));
+    $("prompt").addEventListener("input", () => clearFieldError("prompt"));
+
+    $("themeToggle").addEventListener("click", () => {
+      const cur = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+      applyTheme(cur === "dark" ? "light" : "dark");
+    });
+
+    $("clearLocalLink").addEventListener("click", (e) => {
+      e.preventDefault();
+      if (!confirm("确定清除本地记忆的主题吗?")) return;
+      clearStored();
+      location.reload();
+    });
+
+    $("clearHistoryBtn").addEventListener("click", () => {
+      history.length = 0;
+      renderHistory();
+    });
+
+    $("historyList").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action='show']");
+      if (!btn) return;
+      const row = btn.closest(".history-row");
+      const idx = row && row.dataset.idx;
+      if (idx !== undefined) showHistoryEntry(parseInt(idx, 10));
+    });
+
+    bind("prepareBtn", "POST /tasks/prepare", prepareTask);
+    bind("runPrepareConfirmPlanBtn", "流水线: 准备+确认+规划", runPrepareConfirmPlan);
+    bind("runImageExportBtn", "流水线: 生图+导出", runImageThenExport);
+    bind("loadTaskBtn", "GET /tasks/{id}", loadTask);
+    bind("saveConfirmBtn", "POST /tasks/{id}/confirmation", saveConfirmation);
+    bind("loadConfirmBtn", "GET /tasks/{id}/confirmation", loadConfirmation);
+    bind("planBtn", "POST /tasks/{id}/agent-plan", buildPlan);
+    bind("imageBtn", "POST /tasks/{id}/generate-image", generateImage);
+    bind("exportBtn", "POST /tasks/{id}/export", exportTask);
+    bind("fullRunBtn", "全链路", runFullFlow);
+    bind("artifactsBtn", "GET /tasks/{id}/artifacts", loadArtifacts);
+    bind("runLogBtn", "GET /tasks/{id}/files/run_log", () => loadFile("run_log"));
+    bind("planFileBtn", "GET /tasks/{id}/files/plan", () => loadFile("plan"));
+    bind("confirmFileBtn", "GET /tasks/{id}/files/confirmation", () => loadFile("confirmation"));
+
+    renderHistory();
+  </script>
+</body>
+</html>

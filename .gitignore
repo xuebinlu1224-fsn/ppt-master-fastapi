@@ -1,0 +1,32 @@
+# Secrets — never commit. Use `agent.env.example` as the template.
+.env
+agent.env
+
+# Local Python artifacts.
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Service-managed state. Created at runtime by `POST /tasks/prepare`;
+# not source.
+.service_tasks/
+
+# Hand-driven re-export / scratch projects (large SVGs + pptx output).
+jobs/
+
+# Editor / IDE.
+.vscode/
+.idea/
+.DS_Store
+
+# Codex/mimocode local state.
+.mimocode/
+
+# Build outputs.
+dist/
+build/
+*.egg-info/

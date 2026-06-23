@@ -1,0 +1,47 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.gitattributes
+.venv
+venv
+.env
+agent.env
+.DS_Store
+.mimocode
+.pytest_cache
+
+# Local service state (live, regenerated every task).
+.service_tasks
+
+# Hand-driven re-export / scratch projects (large SVGs + pptx output).
+jobs
+projects
+
+# Inner ppt-master git internals + dev caches.
+ppt-master/.git
+ppt-master/.github
+ppt-master/.pytest_cache
+ppt-master/.pycache
+ppt-master/__pycache__
+ppt-master/skills/ppt-master/scripts/__pycache__
+ppt-master/skills/ppt-master/scripts/*/__pycache__
+ppt-master/skills/ppt-master/projects
+ppt-master/skills/ppt-master/test-data
+
+# Markdown noise we don't need in the image.
+*.md
+README.md
+AGENTS.md
+README_CN.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+LICENSE
+docs/
+
+# Editor / IDE.
+.vscode
+.idea

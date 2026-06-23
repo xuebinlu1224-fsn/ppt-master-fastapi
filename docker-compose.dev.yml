@@ -1,0 +1,53 @@
+# Development override for ppt-master-agent.
+#
+# Use together with the base compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# What this changes vs. production:
+#   * `./ui` is bind-mounted rw into `/app/ui`, so edits to
+#     `ui/index.html` on the host are reflected by FastAPI on the next
+#     request — just refresh the browser.
+#   * Entrypoint switches to `uvicorn --reload --reload-dir /app` so
+#     changes to `app.py` (and the static UI) also auto-reload.
+#   * `agent-state` volume is still mounted — task state survives
+#     rebuilds/restarts the same way as production.
+#
+# This file is a dev-only convenience. Production deployments should
+# keep using `docker-compose.yml` alone.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ppt-master-agent:dev
+    container_name: ppt-master-agent-dev
+    command:
+      - "uvicorn"
+      - "app:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--reload"
+      - "--reload-dir"
+      - "/app"
+      - "--reload-include"
+      - "*.py"
+    env_file:
+      - ./agent.env
+    environment:
+      # Same caveat as docker-compose.yml: do NOT redeclare image-backend
+      # keys here. They are loaded from agent.env via env_file above;
+      # ${VAR} substitution here would silently inject empty strings.
+      PPTMASTER_PYTHON_BIN: python3
+    volumes:
+      # Hot-reload the static console — refresh the browser to pick up
+      # changes to `ui/index.html`.
+      - ./ui:/app/ui
+      - ./app.py:/app/app.py
+      - agent-state:/app/.service_tasks
+    restart: unless-stopped
+
+volumes:
+  agent-state:

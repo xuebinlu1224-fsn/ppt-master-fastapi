@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ppt-master-agent:latest
+    container_name: ppt-master-agent
+    ports:
+      - "8080:8080"
+    # `app.py` reads DEEPSEEK_* + PPTMASTER_PYTHON_BIN from the service's
+    # own .env (or shell env). The `ppt-master/.env` consumed by the inner
+    # image_gen.py is composed in from `agent.env` and merged in via the
+    # `environment:` block below — ppt-master scripts read it from the
+    # process environment first, .env second.
+    env_file:
+      - ./agent.env
+    environment:
+      # PPTMASTER_PYTHON_BIN stays here (no real value in agent.env) so
+      # app.py's resolve_python_bin() picks the slim-image system python3.
+      # Image-backend keys (IMAGE_BACKEND / AGNES_*) are NOT redeclared
+      # here — they come from agent.env via env_file: above. Declaring
+      # them here with ${VAR} substitution would silently override the
+      # env_file values with empty strings when the host shell doesn't
+      # have them set (compose's ${VAR} reads host shell, not env_file).
+      PPTMASTER_PYTHON_BIN: python3
+    volumes:
+      # Persist task state (.service_tasks/<task_id>/{task_prompt.txt,
+      # run.log, last_run.json, agent_plan.json, …}) across rebuilds.
+      - agent-state:/app/.service_tasks
+    restart: unless-stopped
+
+volumes:
+  agent-state:
