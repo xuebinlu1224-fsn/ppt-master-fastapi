@@ -386,6 +386,192 @@
       .hero { flex-direction: column; }
       .hero-actions { flex-direction: row; align-items: stretch; }
     }
+
+    /* ---------- Template gallery & modal ---------- */
+    .card.full { grid-column: span 12; }
+    .template-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0;
+      background: var(--panel);
+      cursor: pointer;
+      overflow: hidden;
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+      display: flex;
+      flex-direction: column;
+    }
+    .template-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(31, 29, 25, 0.12);
+      border-color: var(--accent);
+    }
+    .template-card.is-selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(11, 110, 79, 0.25);
+    }
+    .template-card .preview-strip {
+      display: flex;
+      gap: 0;
+      height: 64px;
+      background: linear-gradient(135deg, #0E1116, #1a1a1a);
+    }
+    .template-card .preview-strip > div {
+      flex: 1 1 0;
+      background-color: #1a1a1a;
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      border-right: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .template-card .preview-strip > div:last-child { border-right: 0; }
+    .template-card .card-body {
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .template-card .name {
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .template-card .color-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+    }
+    .template-card .summary {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .template-card .meta {
+      font-size: 10px;
+      color: var(--muted);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .template-card .badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 9px;
+      font-weight: 700;
+    }
+    .badge.ok { background: var(--ok-soft); color: var(--ok); }
+    .badge.warn { background: var(--warn-soft); color: var(--warn); }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 20px;
+    }
+    .modal-content {
+      background: var(--panel);
+      border-radius: 16px;
+      max-width: 1200px;
+      width: 100%;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.3);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+    }
+    .modal-header h3 {
+      margin: 0;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .modal-header .color-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+    }
+    .modal-close {
+      background: transparent;
+      color: var(--muted);
+      font-size: 24px;
+      padding: 4px 12px;
+      line-height: 1;
+    }
+    .modal-body {
+      padding: 20px 24px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .modal-body .summary {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    .preview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+    }
+    .preview-thumb {
+      background: #0E1116;
+      border-radius: 8px;
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    .preview-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .preview-thumb .page-num {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      background: rgba(0, 0, 0, 0.6);
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .preview-thumb .loading {
+      color: #888;
+      font-size: 12px;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 16px 24px;
+      border-top: 1px solid var(--line);
+    }
   </style>
 </head>
 <body>
@@ -402,6 +588,17 @@
     </section>
 
     <div class="grid">
+      <section class="card full">
+        <h2><span class="step">0</span>选择模板(主题预览)</h2>
+        <div class="hint">点击模板查看前 5 页预览,选定后会自动带入"准备任务"。</div>
+        <div class="actions">
+          <button class="secondary" id="loadTemplatesBtn">加载模板列表</button>
+          <button class="ghost" id="loadExamplesBtn">加载示例模板</button>
+          <span id="selectedTemplateTag" class="pill hidden">已选: <span id="selectedTemplateName"></span></span>
+        </div>
+        <div id="templateGallery" class="gallery hidden"></div>
+      </section>
+
       <section class="card">
         <h2><span class="step">1</span>任务基础参数</h2>
         <div class="hint">先准备一个 <code>ppt-master</code> 任务工程。</div>
@@ -715,7 +912,12 @@
     }
 
     // ---------- session state (per-page-load) ----------
-    const state = { taskId: null };
+    const state = {
+      taskId: null,
+      selectedTemplateId: null,
+      selectedTemplateName: null,
+      selectedTemplateSource: null,  // "deck" | "example"
+    };
     function currentTaskId() {
       const value = state.taskId || "";
       const tag = $("taskTag");
@@ -928,11 +1130,15 @@
 
     // ---------- build payloads ----------
     function buildPreparePayload() {
-      return {
+      const payload = {
         repo_dir: REPO_DIR,
         prompt: $("prompt").value.trim(),
         canvas_format: $("canvasFormat").value,
       };
+      if (state.selectedTemplateId) {
+        payload.template_id = state.selectedTemplateId;
+      }
+      return payload;
     }
 
     function buildConfirmationPayload() {
@@ -1363,6 +1569,182 @@
       if (idx !== undefined) showHistoryEntry(parseInt(idx, 10));
     });
 
+    // ---------- template gallery & preview ----------
+    const TEMPLATE_PREVIEW_PAGES = 5;
+
+    function colorFromTemplate(item) {
+      // Best-effort to derive a primary color for the card top strip.
+      return item.primary_color || "#0E1116";
+    }
+
+    function previewUrl(source, id, page) {
+      const repo = encodeURIComponent(REPO_DIR);
+      if (source === "example") {
+        return `/examples/${encodeURIComponent(id)}/preview/${page}?repo_dir=${repo}`;
+      }
+      return `/templates/${encodeURIComponent(id)}/preview/${page}?repo_dir=${repo}`;
+    }
+
+    function renderTemplateCard(item, source) {
+      const color = colorFromTemplate(item);
+      const previewAvail = item.preview_available === true;
+      const totalPages = item.svg_count || item.page_count || 0;
+      const strip = [];
+      for (let i = 1; i <= TEMPLATE_PREVIEW_PAGES; i++) {
+        if (previewAvail && i <= totalPages) {
+          strip.push(
+            `<div style="background-image:url('${previewUrl(source, item.template_id || item.example_id, i)}')"></div>`
+          );
+        } else {
+          strip.push(`<div></div>`);
+        }
+      }
+      const id = item.template_id || item.example_id;
+      const name = item.template_id || item.example_id;
+      const summary = (item.summary || "").slice(0, 80);
+      const badge = previewAvail
+        ? `<span class="badge ok">预览就绪</span>`
+        : `<span class="badge warn">预览生成中</span>`;
+      return `
+        <div class="template-card" data-id="${escapeHtml(id)}" data-source="${source}">
+          <div class="preview-strip">${strip.join("")}</div>
+          <div class="card-body">
+            <div class="name">
+              <span class="color-dot" style="background:${escapeHtml(color)}"></span>
+              <span>${escapeHtml(name)}</span>
+            </div>
+            <div class="summary">${escapeHtml(summary)}</div>
+            <div class="meta">
+              ${badge}
+              <span>${totalPages} 页</span>
+              <span>· ${source === "example" ? "示例" : "已注册"}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderTemplateGallery(items, source) {
+      const container = $("templateGallery");
+      container.dataset.source = source;
+      window.__lastTemplateList = items || [];
+      window.__lastTemplateSource = source;
+      if (!items || items.length === 0) {
+        container.innerHTML = `<div class="gallery-empty">没有可用的${source === "example" ? "示例" : "模板"}。</div>`;
+        container.classList.remove("hidden");
+        return;
+      }
+      container.innerHTML = items
+        .map((it) => renderTemplateCard(it, source))
+        .join("");
+      container.classList.remove("hidden");
+    }
+
+    async function loadTemplateList() {
+      try {
+        const data = await requestJson(
+          `/templates?repo_dir=${encodeURIComponent(REPO_DIR)}&kind=deck`
+        );
+        const decks = (data && data.decks) || [];
+        recordHistory({
+          label: "GET /templates?kind=deck",
+          ok: true,
+          summary: `${decks.length} 个`,
+          payload: data,
+        });
+        showResponse("模板列表已加载", { count: decks.length, decks }, true);
+        renderTemplateGallery(decks, "deck");
+      } catch (err) {
+        recordHistory({
+          label: "GET /templates?kind=deck",
+          ok: false,
+          summary: err.message,
+          payload: err.payload,
+        });
+        showResponse("加载模板列表失败", { error: err.message, payload: err.payload }, false);
+      }
+    }
+
+    async function loadExampleList() {
+      try {
+        const data = await requestJson(
+          `/examples?repo_dir=${encodeURIComponent(REPO_DIR)}`
+        );
+        const examples = (data && data.examples) || [];
+        recordHistory({
+          label: "GET /examples",
+          ok: true,
+          summary: `${examples.length} 个`,
+          payload: data,
+        });
+        showResponse("示例模板列表已加载", { count: examples.length, examples }, true);
+        renderTemplateGallery(examples, "example");
+      } catch (err) {
+        recordHistory({
+          label: "GET /examples",
+          ok: false,
+          summary: err.message,
+          payload: err.payload,
+        });
+        showResponse("加载示例模板列表失败", { error: err.message, payload: err.payload }, false);
+      }
+    }
+
+    function openTemplatePreview(item, source) {
+      const id = item.template_id || item.example_id;
+      $("modalTemplateName").textContent = id;
+      $("modalColorDot").style.background = colorFromTemplate(item);
+      $("modalTemplateSummary").textContent = item.summary || "(无描述)";
+      $("modalSelectBtn").dataset.id = id;
+      $("modalSelectBtn").dataset.source = source;
+
+      const grid = $("modalPreviewGrid");
+      grid.innerHTML = "";
+      const total = Math.min(
+        TEMPLATE_PREVIEW_PAGES,
+        item.svg_count || item.page_count || TEMPLATE_PREVIEW_PAGES,
+      );
+      for (let i = 1; i <= total; i++) {
+        const wrap = document.createElement("div");
+        wrap.className = "preview-thumb";
+        wrap.innerHTML = `
+          <span class="page-num">第 ${i} 页</span>
+          <span class="loading">加载中…</span>
+        `;
+        const img = new Image();
+        img.alt = `第 ${i} 页`;
+        img.onload = () => {
+          wrap.querySelector(".loading")?.remove();
+          wrap.appendChild(img);
+        };
+        img.onerror = () => {
+          const ld = wrap.querySelector(".loading");
+          if (ld) ld.textContent = "加载失败";
+        };
+        img.src = previewUrl(source, id, i);
+        grid.appendChild(wrap);
+      }
+      $("templatePreviewModal").classList.remove("hidden");
+    }
+
+    function closeTemplatePreview() {
+      $("templatePreviewModal").classList.add("hidden");
+    }
+
+    function applyTemplateSelection(id, name, source) {
+      state.selectedTemplateId = id;
+      state.selectedTemplateName = name;
+      state.selectedTemplateSource = source;
+      $("selectedTemplateName").textContent = name;
+      $("selectedTemplateTag").classList.remove("hidden");
+      // Mark selected card
+      document.querySelectorAll(".template-card").forEach((card) => {
+        const cardId = card.dataset.id;
+        card.classList.toggle("is-selected", cardId === id);
+      });
+      showResponse("已选择模板", { template_id: id, source }, true);
+    }
+
     bind("prepareBtn", "POST /tasks/prepare", prepareTask);
     bind("runPrepareConfirmPlanBtn", "流水线: 准备+确认+规划", runPrepareConfirmPlan);
     bind("runImageExportBtn", "流水线: 生图+导出", runImageThenExport);
@@ -1378,7 +1760,54 @@
     bind("planFileBtn", "GET /tasks/{id}/files/plan", () => loadFile("plan"));
     bind("confirmFileBtn", "GET /tasks/{id}/files/confirmation", () => loadFile("confirmation"));
 
+    // Template gallery bindings
+    $("loadTemplatesBtn").addEventListener("click", loadTemplateList);
+    $("loadExamplesBtn").addEventListener("click", loadExampleList);
+    $("templateGallery").addEventListener("click", (e) => {
+      const card = e.target.closest(".template-card");
+      if (!card) return;
+      const id = card.dataset.id;
+      const source = card.dataset.source;
+      const item = (window.__lastTemplateList || []).find(
+        (it) => (it.template_id || it.example_id) === id
+      );
+      if (item) openTemplatePreview(item, source);
+    });
+    $("modalCloseBtn").addEventListener("click", closeTemplatePreview);
+    $("modalCancelBtn").addEventListener("click", closeTemplatePreview);
+    $("templatePreviewModal").addEventListener("click", (e) => {
+      if (e.target.id === "templatePreviewModal") closeTemplatePreview();
+    });
+    $("modalSelectBtn").addEventListener("click", () => {
+      const id = $("modalSelectBtn").dataset.id;
+      const source = $("modalSelectBtn").dataset.source;
+      if (!id) return;
+      applyTemplateSelection(id, id, source);
+      closeTemplatePreview();
+    });
+
     renderHistory();
   </script>
+
+  <!-- Template Preview Modal -->
+  <div id="templatePreviewModal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>
+          <span class="color-dot" id="modalColorDot"></span>
+          <span id="modalTemplateName"></span>
+        </h3>
+        <button class="modal-close" id="modalCloseBtn" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="summary" id="modalTemplateSummary"></div>
+        <div class="preview-grid" id="modalPreviewGrid"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="ghost" id="modalCancelBtn">取消</button>
+        <button class="secondary" id="modalSelectBtn">选择此模板</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
