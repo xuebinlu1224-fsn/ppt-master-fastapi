@@ -36,6 +36,41 @@
 - `GET /tasks/{task_id}/artifacts`
 - `GET /tasks/{task_id}/files/{file_key}`
 
+
+- `POST /templates/upload`
+  - 上传用户自己的模板 PPTX 文件
+  - 自动调用 `pptx_template_import.py` 提取 manifest + SVG + identity
+  - 仅写入 `.service_tasks/_templates/<template_id>/` 暂存区
+  - 返回分析摘要（配色、字体、页面分类），不会自动进入全局模板库
+
+- `POST /templates/official/upload`
+  - 官方模板上传入口
+  - 上传后立即完成分析、DeepSeek 模板生成和 `register_template.py --kind deck`
+  - 成功后写入 `templates/decks/<template_id>/` 并更新 `decks_index.json`
+
+- `POST /templates/official/{template_id}/create`
+  - 基于已有 staging 的官方入库入口
+  - 读取 `manifest.json` + `identity.json` + `svg-flat` 样本生成 deck 模板
+  - 适合“先用户上传分析，再由官方确认入库”的两步链路
+
+- `POST /templates/{template_id}/create`
+  - 兼容别名，行为等同于 `POST /templates/official/{template_id}/create`
+  - 保留给旧调用方，新的官方入库请优先使用 `official` 路径
+
+- `GET /templates`
+  - 列出所有可用模板（decks, layouts, brands）
+
+- `GET /templates/{template_id}`
+  - 查看模板详情（design_spec.md, SVG 列表, 资源文件）
+
+- `DELETE /templates/{template_id}`
+  - 删除已注册模板及其 staging 数据
+
+- `POST /tasks/prepare` 增加 `template_id` 可选字段
+  - 指定模板后，项目将复制模板文件并使用模板约束设计
+  - `/tasks/{task_id}/strategist` 会自动锁定模板配色/字体
+  - `/tasks/{task_id}/generate-svgs` 会自动参考模板 SVG 布局
+
 ## 删除的旧逻辑
 
 以下平行实现已经移除：

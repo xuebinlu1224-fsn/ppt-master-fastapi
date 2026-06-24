@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,10 +19,201 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / ".service_tasks"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
+TEMPLATE_STAGING_DIR = STATE_DIR / "_templates"
+TEMPLATE_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 
-app = FastAPI(title="ppt-master-agent", version="0.2.0")
+
+def _safe_print(msg: str) -> None:
+    """Print to stderr with flush, matching the convention used by
+    render_template_preview.py and visual_review.py."""
+    import sys
+    print(msg, file=sys.stderr, flush=True)
+
+
+app = FastAPI(title="ppt-master-agent", version="0.3.0")
+
+
+# Preview rendering constants
+PREVIEW_MAX_PAGES = 5
+PREVIEW_SERVER_URL = "http://localhost:5050"
+EXAMPLES_DIR_NAME = "examples"
+
+
+def get_examples_dir(repo_dir: Path) -> Path:
+    """Return the path to the examples directory."""
+    return repo_dir / EXAMPLES_DIR_NAME
+
+
+def resolve_ppt_master_repo(base_dir: Path) -> Optional[Path]:
+    """Try to locate the embedded ppt-master repository at startup.
+
+    Looks for <base>/ppt-master/ first, then for a sibling
+    ppt-master/ that contains skills/ppt-master/. Returns None if
+    neither can be resolved.
+    """
+    candidates: list[Path] = []
+    nested = base_dir / "ppt-master"
+    if nested.is_dir() and (nested / "skills" / "ppt-master").is_dir():
+        candidates.append(nested)
+    for parent in [base_dir.parent, base_dir]:
+        direct = parent
+        if direct.is_dir() and (direct / "skills" / "ppt-master").is_dir():
+            candidates.append(direct)
+    # De-duplicate while preserving order
+    seen: set[Path] = set()
+    for c in candidates:
+        rc = c.resolve()
+        if rc not in seen:
+            seen.add(rc)
+            return rc
+    return None
+
+
+def list_examples(repo_dir: Path) -> list[dict[str, Any]]:
+    """List all example templates under <repo>/examples/.
+
+    Each example is a directory containing svg_final/ subdirectory.
+    """
+    examples_dir = get_examples_dir(repo_dir)
+    if not examples_dir.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in sorted(examples_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        svg_dir = entry / "svg_final"
+        if not svg_dir.is_dir():
+            continue
+        preview_dir = entry / ".preview"
+        preview_count = 0
+        if preview_dir.is_dir():
+            preview_count = sum(1 for _ in preview_dir.glob("preview_*.png"))
+        svg_count = sum(1 for _ in svg_dir.glob("*.svg"))
+        items.append({
+            "example_id": entry.name,
+            "svg_dir": str(svg_dir),
+            "preview_dir": str(preview_dir),
+            "svg_count": svg_count,
+            "preview_count": preview_count,
+            "preview_available": preview_count >= min(PREVIEW_MAX_PAGES, svg_count),
+        })
+    return items
+
+
+def list_examples_with_previews(
+    repo_dir: Path, server_url: str = PREVIEW_SERVER_URL,
+) -> list[dict[str, Any]]:
+    """List example templates and ensure their previews are rendered.
+
+    For each example whose preview is missing or incomplete, attempt to
+    render the first 5 pages. Failures are reported in the returned dict
+    but do not stop other examples from rendering.
+    """
+    examples = list_examples(repo_dir)
+    if not examples:
+        return examples
+
+    python_bin = resolve_python_bin()
+    repo_dir_resolved = repo_dir.resolve()
+    script = script_path(repo_dir_resolved, "render_template_preview.py")
+
+    for ex in examples:
+        try:
+            svg_count = ex.get("svg_count", 0)
+            if svg_count == 0:
+                ex["render_status"] = "skipped_no_svgs"
+                continue
+
+            if ex.get("preview_available"):
+                ex["render_status"] = "already_available"
+                continue
+
+            svg_dir = Path(ex["svg_dir"])
+            preview_dir = Path(ex["preview_dir"])
+            preview_dir.mkdir(parents=True, exist_ok=True)
+
+            cmd = [
+                python_bin,
+                str(script),
+                str(svg_dir),
+                "-o", str(preview_dir),
+                "--server-url", server_url,
+                "--pages", str(PREVIEW_MAX_PAGES),
+            ]
+            _safe_print(f"[startup] rendering preview for example: {ex['example_id']}")
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                ex["render_status"] = "rendered"
+                ex["preview_count"] = min(PREVIEW_MAX_PAGES, svg_count)
+                ex["preview_available"] = True
+            else:
+                ex["render_status"] = f"failed:rc={result.returncode}"
+                ex["render_error"] = (result.stderr or result.stdout)[:500]
+                _safe_print(
+                    f"[startup] preview render failed for {ex['example_id']}: "
+                    f"rc={result.returncode} stderr={result.stderr[:200]}"
+                )
+        except subprocess.TimeoutExpired:
+            ex["render_status"] = "failed:timeout"
+            _safe_print(f"[startup] preview render timeout for {ex['example_id']}")
+        except Exception as e:  # noqa: BLE001
+            ex["render_status"] = f"failed:{type(e).__name__}"
+            ex["render_error"] = str(e)[:200]
+            _safe_print(f"[startup] preview render error for {ex['example_id']}: {e}")
+
+    return examples
+
+
+@app.on_event("startup")
+async def startup_check_example_previews() -> None:
+    """At app startup, ensure all example templates have preview PNGs.
+
+    Renders only missing previews. Uses a thread-based background task so
+    it does not block the server from accepting requests.
+    """
+    import threading
+
+    def _runner() -> None:
+        try:
+            repo = resolve_ppt_master_repo(BASE_DIR)
+            if repo is None:
+                _safe_print(
+                    "[startup] could not locate ppt-master repo; "
+                    "skipping example preview check"
+                )
+                return
+            examples_dir = get_examples_dir(repo)
+            if not examples_dir.is_dir():
+                _safe_print(
+                    f"[startup] no examples/ directory under {repo}; "
+                    "skipping preview check"
+                )
+                return
+
+            examples = list_examples(repo)
+            if not examples:
+                _safe_print("[startup] no example templates found")
+                return
+
+            to_render = [e for e in examples if not e.get("preview_available")]
+            _safe_print(
+                f"[startup] found {len(examples)} example(s) under {repo}, "
+                f"{len(to_render)} need preview rendering"
+            )
+
+            if to_render:
+                list_examples_with_previews(repo)
+                _safe_print("[startup] example preview check complete")
+        except Exception as e:  # noqa: BLE001
+            _safe_print(f"[startup] example preview check failed: {e}")
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
 
 
 class PrepareTaskRequest(BaseModel):
@@ -32,6 +223,7 @@ class PrepareTaskRequest(BaseModel):
     prompt: str = Field(..., description="Deck generation instruction.")
     task_id: Optional[str] = Field(default=None, description="Optional project id under projects/.")
     canvas_format: str = Field(default="ppt169", description="ppt-master canvas format passed to project_manager.py init.")
+    template_id: Optional[str] = Field(default=None, description="Optional template id (from templates/decks/) to apply as design constraint.")
 
 
 class AgentPlanRequest(BaseModel):
@@ -90,6 +282,14 @@ class GenerateSvgsRequest(BaseModel):
     task_id: str
     model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
     max_pages: int = Field(default=30, ge=1, le=100)
+
+
+class TemplateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo_dir: str
+    template_id: str
+    model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
 
 
 class TaskStatusResponse(BaseModel):
@@ -166,6 +366,13 @@ def build_task_id(custom_task_id: Optional[str]) -> str:
     return f"{timestamp}_{uuid.uuid4().hex[:6]}"
 
 
+def build_template_id(custom_template_id: Optional[str]) -> str:
+    if custom_template_id:
+        return custom_template_id
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"tpl_{timestamp}_{uuid.uuid4().hex[:6]}"
+
+
 def ensure_repo_dir(repo_dir: Path) -> Path:
     repo_dir = repo_dir.expanduser().resolve()
     if not repo_dir.exists() or not repo_dir.is_dir():
@@ -225,6 +432,26 @@ def task_paths(repo_dir: Path, task_id: str) -> dict[str, Path]:
         "plan_file": state_dir / "agent_plan.json",
         "confirmation_file": state_dir / "confirmation_data.json",
     }
+
+
+def template_paths(template_id: str) -> dict[str, Path]:
+    staging_dir = TEMPLATE_STAGING_DIR / template_id
+    workspace_dir = staging_dir / "workspace"
+    return {
+        "staging_dir": staging_dir,
+        "source_file": staging_dir / "source.pptx",
+        "workspace_dir": workspace_dir,
+        "manifest_file": workspace_dir / "manifest.json",
+        "summary_file": workspace_dir / "summary.md",
+        "identity_file": workspace_dir / "identity.json",
+        "svg_dir": workspace_dir / "svg-flat",
+        "assets_dir": workspace_dir / "assets",
+        "state_file": staging_dir / "template_state.json",
+    }
+
+
+def get_template_lib_dir(repo_dir: Path, template_id: str) -> Path:
+    return repo_dir / "skills" / "ppt-master" / "templates" / "decks" / template_id
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
@@ -292,6 +519,37 @@ def run_logged_command(
         env=env,
     )
     append_run_log(paths["run_log_file"], label, command, completed)
+    return {
+        "label": label,
+        "command": command,
+        "return_code": completed.returncode,
+        "stdout": completed.stdout[-20000:],
+        "stderr": completed.stderr[-12000:],
+    }
+
+
+def run_logged_command_simple(
+    *,
+    repo_dir: Path,
+    log_path: Path,
+    label: str,
+    command: list[str],
+    extra_env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    if extra_env:
+        env.update(extra_env)
+    completed = subprocess.run(
+        command,
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    append_run_log(log_path, label, command, completed)
     return {
         "label": label,
         "command": command,
@@ -374,6 +632,297 @@ def build_export_readiness(project_dir: Path) -> dict[str, Any]:
     }
 
 
+def read_template_design_spec(repo_dir: Path, template_id: str) -> Optional[str]:
+    template_dir = get_template_lib_dir(repo_dir, template_id)
+    spec_path = template_dir / "design_spec.md"
+    if spec_path.exists():
+        return spec_path.read_text(encoding="utf-8")
+    return None
+
+
+def copy_template_to_project(repo_dir: Path, template_id: str, project_dir: Path) -> bool:
+    template_dir = get_template_lib_dir(repo_dir, template_id)
+    if not template_dir.exists():
+        return False
+    dest = project_dir / "templates"
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in template_dir.iterdir():
+        dest_item = dest / item.name
+        if item.is_dir():
+            if dest_item.exists():
+                shutil.rmtree(dest_item)
+            shutil.copytree(item, dest_item)
+        else:
+            shutil.copy2(item, dest_item)
+    return True
+
+
+def list_template_index(repo_dir: Path, kind: str) -> list[dict[str, Any]]:
+    templates_dir = repo_dir / "skills" / "ppt-master" / "templates"
+    kind_dir_map = {"deck": "decks", "layout": "layouts", "brand": "brands"}
+    dir_name = kind_dir_map.get(kind, kind)
+    # Index file lives in the per-kind subdirectory, e.g. decks/decks_index.json
+    index_path = templates_dir / dir_name / f"{dir_name}_index.json"
+    if not index_path.exists():
+        return []
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    items = []
+    if isinstance(data, dict):
+        for tid, entry in data.items():
+            item = {"template_id": tid, "kind": kind}
+            if isinstance(entry, dict):
+                item.update(entry)
+            items.append(item)
+    items.sort(key=lambda x: x.get("template_id", ""))
+    return items
+
+
+def read_template_info(repo_dir: Path, template_id: str) -> Optional[dict[str, Any]]:
+    template_dir = get_template_lib_dir(repo_dir, template_id)
+    if not template_dir.exists():
+        return None
+    spec_path = template_dir / "design_spec.md"
+    pages = sorted(str(p.name) for p in template_dir.glob("*.svg"))
+    assets = sorted(
+        str(p.name) for p in template_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    )
+    return {
+        "template_id": template_id,
+        "kind": "deck",
+        "design_spec": spec_path.read_text(encoding="utf-8") if spec_path.exists() else "",
+        "pages": pages,
+        "assets": assets,
+    }
+
+
+def persist_template_state(paths: dict[str, Path], payload: dict[str, Any]) -> None:
+    paths["state_file"].parent.mkdir(parents=True, exist_ok=True)
+    paths["state_file"].write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_template_state(paths: dict[str, Path]) -> Optional[dict[str, Any]]:
+    return load_json(paths["state_file"])
+
+
+def _validate_uploaded_template_file(file: UploadFile) -> None:
+    if not file.filename or not file.filename.lower().endswith(".pptx"):
+        raise HTTPException(status_code=400, detail="Only .pptx files are accepted.")
+    if file.size and file.size > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum {MAX_UPLOAD_SIZE // 1024 // 1024} MB.")
+
+
+def _build_template_analysis(
+    *,
+    manifest: Optional[dict[str, Any]],
+    identity: Optional[dict[str, Any]],
+    svg_dir: Path,
+    assets_dir: Path,
+) -> dict[str, Any]:
+    svg_files = sorted(str(p.name) for p in svg_dir.glob("*.svg")) if svg_dir.exists() else []
+    assets_files = sorted(str(p.name) for p in assets_dir.iterdir()) if assets_dir.exists() else []
+    return {
+        "manifest_extracted": manifest is not None,
+        "identity_extracted": identity is not None,
+        "canvas": identity.get("canvas", {}) if identity else {},
+        "theme": identity.get("theme", {}) if identity else {},
+        "page_type_candidates": manifest.get("pageTypeCandidates", {}) if manifest else {},
+        "svg_file_count": len(svg_files),
+        "assets_count": len(assets_files),
+    }
+
+
+def analyze_uploaded_template(
+    *,
+    repo: Path,
+    template_id: str,
+    source_name: str,
+    source_bytes: bytes,
+) -> dict[str, Any]:
+    python_bin = resolve_python_bin()
+    tp = template_paths(template_id)
+    tp["staging_dir"].mkdir(parents=True, exist_ok=True)
+    tp["source_file"].write_bytes(source_bytes)
+
+    log_path = tp["staging_dir"] / "import.log"
+
+    manifest_cmd = [
+        python_bin,
+        str(script_path(repo, "pptx_template_import.py")),
+        str(tp["source_file"]),
+        "-o", str(tp["workspace_dir"]),
+        "--manifest-only",
+    ]
+    manifest_result = run_logged_command_simple(
+        repo_dir=repo,
+        log_path=log_path,
+        label="pptx_template_import:manifest-only",
+        command=manifest_cmd,
+    )
+
+    svg_cmd = [
+        python_bin,
+        str(script_path(repo, "pptx_template_import.py")),
+        str(tp["source_file"]),
+        "-o", str(tp["workspace_dir"]),
+        "--skip-manifest",
+        "--inheritance-mode", "flat",
+    ]
+    svg_result = run_logged_command_simple(
+        repo_dir=repo,
+        log_path=log_path,
+        label="pptx_template_import:svg-flat",
+        command=svg_cmd,
+    )
+
+    identity_cmd = [
+        python_bin,
+        str(script_path(repo, "beautify_identity.py")),
+        str(tp["source_file"]),
+        "-o", str(tp["identity_file"]),
+    ]
+    identity_result = run_logged_command_simple(
+        repo_dir=repo,
+        log_path=log_path,
+        label="beautify_identity",
+        command=identity_cmd,
+    )
+
+    manifest = load_json(tp["manifest_file"])
+    identity = load_json(tp["identity_file"])
+    analysis = _build_template_analysis(
+        manifest=manifest,
+        identity=identity,
+        svg_dir=tp["svg_dir"],
+        assets_dir=tp["assets_dir"],
+    )
+    state = read_template_state(tp) or {}
+    state.update({
+        "template_id": template_id,
+        "status": "analyzed",
+        "source_name": source_name,
+        "created_at": state.get("created_at") or datetime.now().isoformat(),
+        "repo_dir": str(repo),
+        "analysis": analysis,
+        "registered": False,
+        "template_dir": None,
+        "pages": [],
+        "step_results": {
+            "manifest": manifest_result,
+            "svg_conversion": svg_result,
+            "identity": identity_result,
+        },
+    })
+    persist_template_state(tp, state)
+    return {
+        "template_id": template_id,
+        "status": "analyzed",
+        "source_name": source_name,
+        "analysis": analysis,
+        "registered": False,
+        "staging_dir": str(tp["staging_dir"]),
+    }
+
+
+def create_registered_template_from_staging(
+    *,
+    repo: Path,
+    template_id: str,
+    model: str,
+    source: str,
+) -> dict[str, Any]:
+    tp = template_paths(template_id)
+    if not tp["manifest_file"].exists():
+        raise HTTPException(status_code=404, detail=f"Template analysis not found for: {template_id}. Upload first via POST /templates/upload.")
+    if not tp["identity_file"].exists():
+        raise HTTPException(status_code=404, detail=f"Identity not yet extracted for: {template_id}.")
+
+    python_bin = resolve_python_bin()
+    log_path = tp["staging_dir"] / "import.log"
+    manifest_json = tp["manifest_file"].read_text(encoding="utf-8")
+    identity_json = tp["identity_file"].read_text(encoding="utf-8")
+
+    svg_samples: list[dict[str, str]] = []
+    svg_dir = tp["svg_dir"]
+    if svg_dir.exists():
+        svg_list = sorted(svg_dir.glob("slide_*.svg"))
+        indices = [0]
+        if len(svg_list) > 2:
+            indices.append(len(svg_list) // 2)
+        if len(svg_list) > 1:
+            indices.append(len(svg_list) - 1)
+        for i in indices:
+            if 0 <= i < len(svg_list):
+                svg_path = svg_list[i]
+                svg_samples.append({
+                    "name": svg_path.name,
+                    "content": svg_path.read_text(encoding="utf-8"),
+                    "note": "first slide" if i == 0 else "last slide" if i == len(svg_list) - 1 else "middle slide",
+                })
+
+    result = call_deepseek_template_creator(
+        manifest_json=manifest_json,
+        identity_json=identity_json,
+        svg_samples=svg_samples,
+        model=model,
+    )
+
+    template_dir = get_template_lib_dir(repo, template_id)
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "design_spec.md").write_text(result["design_spec_md"], encoding="utf-8")
+
+    pages = []
+    for filename, svg_content in result.get("template_svgs", {}).items():
+        svg_path = template_dir / filename
+        svg_path.write_text(svg_content, encoding="utf-8")
+        pages.append(filename)
+    pages.sort()
+
+    assets_dir = tp["assets_dir"]
+    if assets_dir.exists():
+        for asset in assets_dir.iterdir():
+            if asset.is_file():
+                shutil.copy2(asset, template_dir / asset.name)
+
+    register_cmd = [
+        python_bin,
+        str(script_path(repo, "register_template.py")),
+        template_id,
+        "--kind", "deck",
+    ]
+    register_result = run_logged_command_simple(
+        repo_dir=repo,
+        log_path=log_path,
+        label="register_template",
+        command=register_cmd,
+    )
+
+    state = read_template_state(tp) or {}
+    state.update({
+        "status": "registered" if register_result["return_code"] == 0 else "registration_failed",
+        "template_dir": str(template_dir),
+        "pages": pages,
+        "registered": register_result["return_code"] == 0,
+        "registered_at": datetime.now().isoformat(),
+        "registration_source": source,
+    })
+    persist_template_state(tp, state)
+
+    return {
+        "template_id": template_id,
+        "status": state["status"],
+        "template_dir": str(template_dir),
+        "design_spec_path": str(template_dir / "design_spec.md"),
+        "pages": pages,
+        "registered": register_result["return_code"] == 0,
+        "source": source,
+    }
+
+# --- DeepSeek clients ---
+
 def _get_deepseek_client() -> "OpenAI":
     api_key = service_env("DEEPSEEK_API_KEY")
     if not api_key:
@@ -391,8 +940,24 @@ def call_deepseek_strategist(
     canvas_format: str,
     project_state: dict[str, Any],
     model: str,
+    template_design_spec: Optional[str] = None,
 ) -> dict[str, str]:
     client = _get_deepseek_client()
+    template_block = ""
+    if template_design_spec:
+        template_block = (
+            "\n\n=== TEMPLATE CONSTRAINT (MANDATORY) ===\n"
+            "This project uses a pre-existing design template. The following design_spec.md "
+            "defines the template's visual identity. You MUST strictly preserve:\n"
+            "- Color palette (all HEX values from the template)\n"
+            "- Typography system (font families, sizes, roles)\n"
+            "- Layout principles and visual style\n"
+            "Adapt the template to the user's content needs, but do NOT change the core "
+            "visual identity elements. Override only when the user's prompt explicitly "
+            "demands a different style.\n\n"
+            "TEMPLATE DESIGN SPEC:\n"
+            f"{template_design_spec}\n"
+        )
     system_prompt = (
         "You are a PPT design strategist for the ppt-master system. "
         "Your job is to produce two markdown files for a presentation project: "
@@ -445,6 +1010,7 @@ def call_deepseek_strategist(
                 "Estimate page count from the prompt's content scope. "
                 "Design a cohesive visual theme with a clear color palette and typography system."
             ),
+            "template_context": template_design_spec or "",
         },
         ensure_ascii=False,
         indent=2,
@@ -452,7 +1018,7 @@ def call_deepseek_strategist(
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": system_prompt + template_block},
             {"role": "user", "content": user_message},
         ],
         stream=False,
@@ -471,6 +1037,83 @@ def call_deepseek_strategist(
     }
 
 
+def call_deepseek_template_creator(
+    manifest_json: str,
+    identity_json: str,
+    svg_samples: list[dict[str, str]],
+    model: str,
+) -> dict[str, str]:
+    client = _get_deepseek_client()
+    svg_sample_block = ""
+    for sample in svg_samples:
+        svg_sample_block += f"\n\n### {sample['name']}\n```svg\n{sample['content'][:3000]}\n```\n"
+
+    system_prompt = (
+        "You are a template designer for the ppt-master system. "
+        "Your job is to create a reusable deck template from an uploaded PPTX file.\n\n"
+        "You will receive:\n"
+        "1. A manifest.json describing the PPTX structure (slide size, theme colors, fonts, per-slide layout info)\n"
+        "2. An identity.json with extracted visual identity (color palette, fonts, sizes)\n"
+        "3. A few sample SVG conversions of key slides (cover, content, ending)\n\n"
+        "Your task:\n"
+        "1. Produce a design_spec.md with YAML frontmatter and these sections:\n"
+        "   - Template Overview (summary, use case, style)\n"
+        "   - Color Scheme (exact HEX values from identity, mapped to ppt-master roles)\n"
+        "   - Signature Design Elements (key visual motifs, decorations, layout patterns)\n"
+        "   - Page Roster (list each template SVG with its purpose)\n"
+        "2. Produce template SVG pages. For each page type (cover, toc, chapter, content, ending), "
+        "create a clean, maintainable SVG that captures the visual style of the original PPTX. "
+        "Replace original text content with {{PLACEHOLDER}} markers:\n"
+        "   - {{TITLE}} for main titles\n"
+        "   - {{SUBTITLE}} for subtitles\n"
+        "   - {{CONTENT}} for body content areas\n"
+        "   - {{CHAPTER_NUM}} / {{CHAPTER_TITLE}} for chapter dividers\n"
+        "   - {{THANK_YOU}} for ending pages\n"
+        "   - {{AUTHOR}} / {{DATE}} for metadata\n"
+        "3. The SVGs should be simplified reconstructions — not 1:1 copies. "
+        "Preserve the color palette, font choices, decoration style, and layout rhythm.\n\n"
+        "Return a JSON object with exactly two fields:\n"
+        '{"design_spec_md": "...", "template_svgs": {"01_cover.svg": "...", "02_toc.svg": "...", ...}}\n'
+        "Each SVG value is the full SVG markup string. Use viewBox matching the canvas size."
+    )
+    user_message = json.dumps(
+        {
+            "manifest": json.loads(manifest_json),
+            "identity": json.loads(identity_json),
+            "svg_samples_list": [{"name": s["name"], "note": s.get("note", "")} for s in svg_samples],
+            "instructions": (
+                "Create a designer-friendly deck template from this source PPTX. "
+                "Generate at minimum: cover, chapter, content, ending pages. "
+                "Also include TOC if the source has one. "
+                "Use the exact colors and fonts from the identity. "
+                "Keep SVGs clean and maintainable — simplify decorations but preserve the visual signature."
+            ),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": svg_sample_block + "\n\n" + user_message},
+        ],
+        stream=False,
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content or "{}"
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"DeepSeek template creator did not return valid JSON: {exc}") from exc
+    if not isinstance(parsed.get("design_spec_md"), str):
+        raise HTTPException(status_code=500, detail="Template creator response missing design_spec_md field.")
+    return {
+        "design_spec_md": parsed["design_spec_md"],
+        "template_svgs": parsed.get("template_svgs", {}),
+    }
+
+
 def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
     import re
 
@@ -479,7 +1122,6 @@ def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
 
     pages: dict[str, dict[str, Optional[str]]] = {}
 
-    # Parse page_rhythm: P01: "cover"  (primary source of page IDs)
     rhythm_section = _extract_section(spec_lock_md, "page_rhythm")
     if rhythm_section:
         for match in re.finditer(r"^\s*(P\d+):\s*(.+)", rhythm_section, re.MULTILINE):
@@ -489,15 +1131,12 @@ def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
                 pages[pid] = {"page": pid, "rhythm": None, "layout": None, "chart": None}
             pages[pid]["rhythm"] = rhythm_val
 
-    # Parse page_layouts: extract layout names (layout_cover, etc.) without P prefix
     layouts_section = _extract_section(spec_lock_md, "page_layouts")
     layout_names: list[str] = []
     if layouts_section:
         layout_names = re.findall(r"^\s*(\w+):\s*$", layouts_section, re.MULTILINE)
-        # Remove known non-layout entries
         layout_names = [ln for ln in layout_names if ln not in ("type",)]
 
-    # Match layouts to pages by trying rhythm_value in layout name
     for pid, page in pages.items():
         rhythm = page.get("rhythm", "")
         if rhythm:
@@ -510,7 +1149,6 @@ def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
                 if 0 <= idx < len(layout_names):
                     page["layout"] = layout_names[idx]
 
-    # Parse page_charts: try P02_xxx match
     charts_section = _extract_section(spec_lock_md, "page_charts")
     if charts_section:
         chart_names = re.findall(r"^\s*(P\d+_\w+):\s*$", charts_section, re.MULTILINE)
@@ -520,7 +1158,6 @@ def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
                     page["chart"] = cn
                     break
 
-    # Fallback: extract page IDs from design_spec style content_outline section
     if not pages:
         outline = _extract_section(spec_lock_md, "content_outline")
         if outline:
@@ -531,7 +1168,6 @@ def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
 
     result = sorted(pages.values(), key=lambda p: p["page"])
     if not result:
-        # Last resort: search for any P\d+ pattern in the entire spec
         all_page_ids = sorted(set(re.findall(r"\b(P\d+)\b", spec_lock_md)))
         for pid in all_page_ids:
             pages[pid] = {"page": pid, "rhythm": None, "layout": None, "chart": None}
@@ -541,13 +1177,11 @@ def parse_spec_lock_pages(spec_lock_md: str) -> list[dict[str, Optional[str]]]:
 
 def _extract_section(md_text: str, section_name: str) -> str:
     import re
-    # Match section_name: or ## section_name (with optional # prefix, optional colon)
     pattern = re.compile(rf"^(?:#+\s*)?{re.escape(section_name)}\s*:?\s*$", re.MULTILINE)
     match = pattern.search(md_text)
     if not match:
         return ""
     start = match.end()
-    # End at next non-indented key: line or # header
     next_key = re.compile(r"^(?:#+\s*)?\w[\w\s]*:?\s*$", re.MULTILINE)
     next_match = next_key.search(md_text, start)
     end = next_match.start() if next_match else len(md_text)
@@ -559,12 +1193,22 @@ def call_deepseek_svg_page(
     page_meta: dict[str, Any],
     design_spec_md: str,
     model: str,
+    template_svg: Optional[str] = None,
 ) -> str:
     client = _get_deepseek_client()
     page_id = page_meta.get("page", "unknown")
     rhythm = page_meta.get("rhythm", "dense")
     layout = page_meta.get("layout", "")
     chart = page_meta.get("chart", "")
+    template_hint = ""
+    if template_svg:
+        template_hint = (
+            "\n\n=== TEMPLATE SVG REFERENCE (base layout and decorations) ===\n"
+            f"{template_svg[:4000]}\n"
+            "=== END TEMPLATE ===\n"
+            "Keep the same decoration, background, and layout structure from the template. "
+            "Replace {{PLACEHOLDER}} text with the actual content from design_spec."
+        )
     system_prompt = (
         "You are an SVG designer for PowerPoint presentations. "
         "Generate a single clean, well-structured SVG slide that will be converted to PPTX.\n\n"
@@ -588,7 +1232,8 @@ def call_deepseek_svg_page(
         f"Page: {page_id}\n"
         f"Rhythm: {rhythm}\n"
         f"{layout_hint}\n"
-        f"{chart_hint}\n\n"
+        f"{chart_hint}\n"
+        f"{template_hint}\n\n"
         "=== SPEC LOCK (execution contract) ===\n"
         f"{spec_lock_md}\n\n"
         "=== DESIGN SPEC (content outline for this page) ===\n"
@@ -718,6 +1363,10 @@ def call_deepseek_plan(request: AgentPlanRequest, repo_dir: Path, metadata: dict
     }
 
 
+# ============================================================================
+# Endpoints: Health, Index
+# ============================================================================
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -728,6 +1377,265 @@ def index() -> FileResponse:
     return FileResponse(BASE_DIR / "ui" / "index.html")
 
 
+# ============================================================================
+# Endpoints: Templates
+# ============================================================================
+
+@app.post("/templates/upload")
+async def upload_template(
+    repo_dir: str = Form(...),
+    file: UploadFile = File(...),
+    template_id: Optional[str] = Form(None),
+) -> dict[str, Any]:
+    repo = ensure_repo_dir(Path(repo_dir))
+    _validate_uploaded_template_file(file)
+    tid = build_template_id(template_id)
+    source_bytes = await file.read()
+    return analyze_uploaded_template(
+        repo=repo,
+        template_id=tid,
+        source_name=file.filename,
+        source_bytes=source_bytes,
+    )
+
+
+@app.post("/templates/official/upload")
+async def upload_official_template(
+    repo_dir: str = Form(...),
+    file: UploadFile = File(...),
+    template_id: Optional[str] = Form(None),
+    model: str = Form(DEFAULT_DEEPSEEK_MODEL),
+) -> dict[str, Any]:
+    repo = ensure_repo_dir(Path(repo_dir))
+    _validate_uploaded_template_file(file)
+    tid = build_template_id(template_id)
+    source_bytes = await file.read()
+    analyze_uploaded_template(
+        repo=repo,
+        template_id=tid,
+        source_name=file.filename,
+        source_bytes=source_bytes,
+    )
+    return create_registered_template_from_staging(
+        repo=repo,
+        template_id=tid,
+        model=model,
+        source="official_upload",
+    )
+
+
+@app.post("/templates/official/{template_id}/create")
+def create_official_template(template_id: str, request: TemplateCreateRequest) -> dict[str, Any]:
+    if request.template_id != template_id:
+        raise HTTPException(status_code=400, detail="Path template_id does not match request body template_id.")
+    repo = ensure_repo_dir(Path(request.repo_dir))
+    return create_registered_template_from_staging(
+        repo=repo,
+        template_id=template_id,
+        model=request.model,
+        source="official_create",
+    )
+
+
+@app.post("/templates/{template_id}/create")
+def create_template_compat(template_id: str, request: TemplateCreateRequest) -> dict[str, Any]:
+    return create_official_template(template_id, request)
+
+
+@app.get("/templates")
+def list_templates(repo_dir: str, kind: Optional[str] = None) -> dict[str, Any]:
+    repo = ensure_repo_dir(Path(repo_dir))
+    result: dict[str, list[dict[str, Any]]] = {}
+    kinds = [kind] if kind else ["deck", "layout", "brand"]
+    for k in kinds:
+        items = list_template_index(repo, k)
+        # For deck templates, also check preview availability
+        if k == "deck" and items:
+            for item in items:
+                tid = item.get("template_id", "")
+                preview_dir = get_template_lib_dir(repo, tid) / ".preview"
+                if preview_dir.is_dir():
+                    png_count = sum(1 for _ in preview_dir.glob("preview_*.png"))
+                    item["preview_count"] = png_count
+                    item["preview_available"] = png_count >= min(
+                        PREVIEW_MAX_PAGES, item.get("page_count", 0) or 0
+                    )
+                else:
+                    item["preview_count"] = 0
+                    item["preview_available"] = False
+        if items:
+            result[k + "s"] = items
+    if not result:
+        result = {"decks": [], "layouts": [], "brands": []}
+    return result
+
+
+@app.get("/templates/{template_id}")
+def get_template(template_id: str, repo_dir: str) -> dict[str, Any]:
+    repo = ensure_repo_dir(Path(repo_dir))
+    info = read_template_info(repo, template_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"Template not found: {template_id}")
+    return info
+
+
+def _resolve_template_preview_dir(repo_dir: Path, template_id: str) -> Optional[Path]:
+    """Return the .preview directory for a deck template, or None if missing."""
+    template_dir = get_template_lib_dir(repo_dir, template_id)
+    if not template_dir.exists():
+        return None
+    preview_dir = template_dir / ".preview"
+    return preview_dir if preview_dir.is_dir() else None
+
+
+@app.post("/templates/{template_id}/render-preview")
+def render_template_preview_endpoint(
+    template_id: str, repo_dir: str, force: bool = False,
+) -> dict[str, Any]:
+    """Manually trigger preview rendering for a deck template.
+
+    Skips already-rendered files unless force=True. Returns a summary of
+    rendered/skipped/failed pages.
+    """
+    repo = ensure_repo_dir(Path(repo_dir))
+    template_dir = get_template_lib_dir(repo, template_id)
+    if not template_dir.is_dir():
+        raise HTTPException(
+            status_code=404, detail=f"Template not found: {template_id}"
+        )
+
+    svg_files = sorted(p.name for p in template_dir.glob("*.svg"))
+    if not svg_files:
+        raise HTTPException(
+            status_code=400, detail=f"No SVG files in template: {template_id}"
+        )
+
+    preview_dir = template_dir / ".preview"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+
+    python_bin = resolve_python_bin()
+    script = script_path(repo, "render_template_preview.py")
+
+    cmd = [
+        python_bin,
+        str(script),
+        str(template_dir),
+        "-o", str(preview_dir),
+        "--server-url", PREVIEW_SERVER_URL,
+        "--pages", str(PREVIEW_MAX_PAGES),
+    ]
+    if force:
+        cmd.append("--force")
+
+    _safe_print(f"[render-preview] template={template_id} cmd={' '.join(cmd)}")
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Preview render timed out")
+
+    return {
+        "template_id": template_id,
+        "preview_dir": str(preview_dir),
+        "return_code": result.returncode,
+        "stdout": (result.stdout or "")[:1000],
+        "stderr": (result.stderr or "")[:1000],
+    }
+
+
+@app.get("/templates/{template_id}/preview/{page_num}")
+def get_template_preview(
+    template_id: str, repo_dir: str, page_num: int,
+) -> FileResponse:
+    """Return a preview PNG for the given template page (1-5)."""
+    if page_num < 1 or page_num > PREVIEW_MAX_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"page_num must be 1..{PREVIEW_MAX_PAGES}",
+        )
+    repo = ensure_repo_dir(Path(repo_dir))
+    preview_dir = _resolve_template_preview_dir(repo, template_id)
+    if preview_dir is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Preview not available for template: {template_id}",
+        )
+    png_path = preview_dir / f"preview_{page_num:02d}.png"
+    if not png_path.is_file():
+        raise HTTPException(
+            status_code=404, detail=f"Preview page {page_num} not found",
+        )
+    return FileResponse(png_path, media_type="image/png")
+
+
+@app.get("/examples")
+def list_examples_endpoint(repo_dir: str) -> dict[str, Any]:
+    """List all example templates under <repo>/examples/ with preview status.
+
+    Previews are auto-rendered at startup if missing. This endpoint reports
+    the current state and per-example render status.
+    """
+    repo = ensure_repo_dir(Path(repo_dir))
+    items = list_examples(repo)
+    return {"examples": items, "count": len(items)}
+
+
+@app.get("/examples/{example_id}/preview/{page_num}")
+def get_example_preview(
+    repo_dir: str, example_id: str, page_num: int,
+) -> FileResponse:
+    """Return a preview PNG for the given example page (1-5)."""
+    if page_num < 1 or page_num > PREVIEW_MAX_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"page_num must be 1..{PREVIEW_MAX_PAGES}",
+        )
+    repo = ensure_repo_dir(Path(repo_dir))
+    example_dir = get_examples_dir(repo) / example_id
+    if not example_dir.is_dir():
+        raise HTTPException(
+            status_code=404, detail=f"Example not found: {example_id}"
+        )
+    preview_dir = example_dir / ".preview"
+    if not preview_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Preview not available for example: {example_id}",
+        )
+    png_path = preview_dir / f"preview_{page_num:02d}.png"
+    if not png_path.is_file():
+        raise HTTPException(
+            status_code=404, detail=f"Preview page {page_num} not found",
+        )
+    return FileResponse(png_path, media_type="image/png")
+
+
+@app.delete("/templates/{template_id}")
+def delete_template(template_id: str, repo_dir: str) -> dict[str, Any]:
+    repo = ensure_repo_dir(Path(repo_dir))
+    template_dir = get_template_lib_dir(repo, template_id)
+    staging_dir = TEMPLATE_STAGING_DIR / template_id
+
+    deleted = []
+    if template_dir.exists():
+        shutil.rmtree(template_dir)
+        deleted.append(str(template_dir))
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+        deleted.append(str(staging_dir))
+
+    python_bin = resolve_python_bin()
+    register_cmd = [python_bin, str(script_path(repo, "register_template.py")), "--kind", "deck", "--rebuild-all"]
+    subprocess.run(register_cmd, cwd=repo, capture_output=True, text=True)
+
+    return {"template_id": template_id, "deleted": deleted, "status": "ok"}
+
+
+# ============================================================================
+# Endpoints: Tasks
+# ============================================================================
+
 @app.post("/tasks/prepare", response_model=TaskStatusResponse)
 def prepare_task(request: PrepareTaskRequest) -> TaskStatusResponse:
     repo_dir = ensure_repo_dir(Path(request.repo_dir))
@@ -735,6 +1643,11 @@ def prepare_task(request: PrepareTaskRequest) -> TaskStatusResponse:
     paths = task_paths(repo_dir, task_id)
     if paths["state_dir"].exists():
         raise HTTPException(status_code=409, detail=f"Task state already exists: {paths['state_dir']}")
+
+    if request.template_id:
+        template_dir = get_template_lib_dir(repo_dir, request.template_id)
+        if not template_dir.exists() or not (template_dir / "design_spec.md").exists():
+            raise HTTPException(status_code=400, detail=f"Template not found or missing design_spec.md: {request.template_id}")
 
     python_bin = resolve_python_bin()
     project_manager = script_path(repo_dir, "project_manager.py")
@@ -768,6 +1681,10 @@ def prepare_task(request: PrepareTaskRequest) -> TaskStatusResponse:
     project_dir = extract_created_project_path(init_completed.stdout)
     append_run_log(paths["run_log_file"], "project_manager:init", init_command, init_completed)
 
+    template_copied = False
+    if request.template_id:
+        template_copied = copy_template_to_project(repo_dir, request.template_id, project_dir)
+
     write_task_prompt(request.prompt, project_dir, paths["prompt_file"], task_id)
     metadata = {
         "task_id": task_id,
@@ -777,10 +1694,11 @@ def prepare_task(request: PrepareTaskRequest) -> TaskStatusResponse:
         "prompt_file": str(paths["prompt_file"]),
         "user_prompt": request.prompt.strip(),
         "canvas_format": request.canvas_format,
+        "template_id": request.template_id,
     }
     paths["metadata_file"].parent.mkdir(parents=True, exist_ok=True)
     paths["metadata_file"].write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    persist_last_run(paths, {"status": "ok", "step": "prepare", "task_id": task_id})
+    persist_last_run(paths, {"status": "ok", "step": "prepare", "task_id": task_id, "template_id": request.template_id, "template_copied": template_copied})
 
     return TaskStatusResponse(
         task_id=task_id,
@@ -1001,11 +1919,17 @@ def run_strategist(task_id: str, request: StrategistRequest) -> dict[str, Any]:
     task_prompt = metadata.get("user_prompt", "")
     canvas_format = metadata.get("canvas_format", "ppt169")
 
+    template_id = metadata.get("template_id")
+    template_design_spec = None
+    if template_id:
+        template_design_spec = read_template_design_spec(repo_dir, template_id)
+
     strat_result = call_deepseek_strategist(
         task_prompt=task_prompt,
         canvas_format=canvas_format,
         project_state=project_state,
         model=request.model,
+        template_design_spec=template_design_spec,
     )
     design_spec_path = project_dir / "design_spec.md"
     spec_lock_path = project_dir / "spec_lock.md"
@@ -1020,6 +1944,7 @@ def run_strategist(task_id: str, request: StrategistRequest) -> dict[str, Any]:
         "spec_lock_path": str(spec_lock_path),
         "design_spec_size": len(strat_result["design_spec_md"]),
         "spec_lock_size": len(strat_result["spec_lock_md"]),
+        "template_applied": bool(template_id),
     }
     persist_last_run(paths, payload)
     return payload
@@ -1030,7 +1955,7 @@ def generate_svgs(task_id: str, request: GenerateSvgsRequest) -> dict[str, Any]:
     if request.task_id != task_id:
         raise HTTPException(status_code=400, detail="Path task_id does not match request body task_id.")
     repo_dir = ensure_repo_dir(Path(request.repo_dir))
-    paths, _, project_dir = ensure_task(repo_dir, task_id)
+    paths, metadata, project_dir = ensure_task(repo_dir, task_id)
 
     spec_lock_path = project_dir / "spec_lock.md"
     if not spec_lock_path.exists():
@@ -1049,6 +1974,30 @@ def generate_svgs(task_id: str, request: GenerateSvgsRequest) -> dict[str, Any]:
 
     svg_output_dir = project_dir / "svg_output"
     svg_output_dir.mkdir(parents=True, exist_ok=True)
+
+    templates_dir = project_dir / "templates"
+    template_svgs: dict[str, str] = {}
+    if templates_dir.exists():
+        for svg_file in sorted(templates_dir.glob("*.svg")):
+            template_svgs[svg_file.name] = svg_file.read_text(encoding="utf-8")
+
+    def _match_template_svg(page_meta: dict[str, Any]) -> Optional[str]:
+        if not template_svgs:
+            return None
+        rhythm = page_meta.get("rhythm", "")
+        layout = page_meta.get("layout", "")
+        for name, content in template_svgs.items():
+            name_lower = name.lower()
+            if rhythm and rhythm.lower() in name_lower:
+                return content
+            if layout and layout.lower() in name_lower:
+                return content
+        svg_names = sorted(template_svgs.keys())
+        pid_str = page_meta.get("page", "")
+        idx = int(pid_str[1:]) - 1 if pid_str and pid_str[1:].isdigit() else -1
+        if idx == 0 and svg_names:
+            return template_svgs[svg_names[0]]
+        return None
 
     spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
     pages = parse_spec_lock_pages(spec_lock_md)
@@ -1073,11 +2022,13 @@ def generate_svgs(task_id: str, request: GenerateSvgsRequest) -> dict[str, Any]:
         svg_path = svg_output_dir / f"{page_id.lower()}_{page_meta.get('rhythm', 'slide')}.svg"
         try:
             spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
+            tpl_svg = _match_template_svg(page_meta)
             svg_text = call_deepseek_svg_page(
                 spec_lock_md=spec_lock_md,
                 page_meta=page_meta,
                 design_spec_md=design_spec_md,
                 model=request.model,
+                template_svg=tpl_svg,
             )
             valid, error = validate_minimal_svg(svg_text)
             if not valid:
@@ -1087,6 +2038,7 @@ def generate_svgs(task_id: str, request: GenerateSvgsRequest) -> dict[str, Any]:
                     page_meta=page_meta,
                     design_spec_md=design_spec_md,
                     model=request.model,
+                    template_svg=tpl_svg,
                 )
                 valid, error = validate_minimal_svg(svg_text)
             if not valid:
@@ -1157,6 +2109,8 @@ def list_tasks(repo_dir: str) -> dict[str, Any]:
 
     for state_dir in sorted((p for p in STATE_DIR.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
         task_id = state_dir.name
+        if task_id.startswith("_"):
+            continue
         paths = task_paths(repo, task_id)
         metadata = load_json(paths["metadata_file"])
         if metadata is None:
