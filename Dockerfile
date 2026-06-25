@@ -34,19 +34,21 @@ COPY requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /app/requirements.txt
 
-# Vendored ppt-master + its own requirements (heavy: python-pptx, svglib,
-# reportlab, PyMuPDF, mammoth, openpyxl, Pillow, numpy, …).
-COPY ppt-master/ /app/ppt-master/
+# Keep the heavy ppt-master dependency layer independent from the rest of the
+# vendored source tree so non-requirement edits do not invalidate it.
+COPY ppt-master/skills/ppt-master/requirements.txt /app/ppt-master/skills/ppt-master/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /app/ppt-master/skills/ppt-master/requirements.txt
+
+# Vendored ppt-master source tree (examples/templates/scripts stay intact).
+COPY ppt-master/ /app/ppt-master/
 
 # Outer service code, static UI, and the orchestrator entrypoint.
 COPY app.py /app/app.py
 COPY ui/ /app/ui/
 
-# Image-generation tooling lives under ppt-master/.env (read by image_gen.py
-# at run-time). Mount it via `env_file:` in docker-compose.yml; do NOT bake
-# any real keys into the image.
+# Runtime config comes from the root env file mounted via `env_file:` in
+# docker-compose.yml; do NOT bake any real keys into the image.
 # The vendored ppt-master/.env in this repo currently contains a leaked
 # AGNES_API_KEY; rotate it and supply a clean file via env_file.
 

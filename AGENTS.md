@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Outer FastAPI orchestrator for the vendored `ppt-master` skill. Owns
-task bookkeeping, the DeepSeek planner, and an HTTP API; delegates
+task bookkeeping, the LLM planner, and an HTTP API; delegates
 every real PPT capability (project creation, image generation, SVG
 post-processing, export) to scripts inside `ppt-master/`.
 
@@ -18,7 +18,7 @@ post-processing, export) to scripts inside `ppt-master/`.
 - `app.py` — sole service entrypoint. FastAPI app, all routes, Python
   interpreter resolution, subprocess orchestration.
 - `requirements.txt` — runtime deps only: `fastapi`, `openai`,
-  `uvicorn`. No dev deps.
+  `python-multipart`, `uvicorn`. No dev deps.
 - `Dockerfile` + `docker-compose.yml` + `agent.env.example` — single
   container that bakes in `ppt-master/`, serves the API and static UI
   on `:8080`, persists `.service_tasks/` to a named volume
@@ -70,6 +70,11 @@ docker compose down
 ./dev.sh
 ```
 
+`python-multipart` is required by FastAPI at import time for the
+template upload endpoints (`/templates/upload`,
+`/templates/official/upload`). If it is missing, `uvicorn app:app`
+crashes before the service can boot.
+
 No test, lint, typecheck, or formatter commands exist. Do not invent
 them.
 
@@ -88,27 +93,31 @@ them.
 Request/response schemas: `app.py:28-120`. Canonical curl recipes:
 root `README.md`.
 
-## Two-env rule (the most common foot-gun)
+## Config rule
 
-This service reads **two different `.env` files** in **two different
-places**, and neither knows about the other:
+Preferred setup: keep both outer-service LLM config and inner image-backend
+config in **one root config file** (`agent.env` for Docker, `.env` for local
+dev). `app.py` reads that file directly, and every child `ppt-master` process
+inherits it via environment injection.
 
-- **Root `.env`** (or shell env) — consumed only by `app.py`:
-  - `DEEPSEEK_API_KEY` (required for `/agent-plan`)
-  - `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`)
-  - `DEEPSEEK_MODEL` (default `deepseek-v4-pro`)
+- **Root `agent.env` / `.env`** (or shell env) — primary config source:
+  - `LLM_PROVIDER` (recommended; e.g. `deepseek`, `minimax`)
+  - `LLM_API_KEY` (recommended for `/agent-plan`, `/strategist`, `/generate-svgs`)
+  - `LLM_BASE_URL` (default `https://api.deepseek.com`; MiniMax commonly uses `https://api.minimaxi.com/v1`)
+  - `LLM_MODEL` (default `deepseek-v4-pro`; MiniMax M3 can be set here)
+  - Legacy fallback: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
+  - Image backend keys: `IMAGE_BACKEND`, `AGNES_*`, `OPENAI_*`, `GEMINI_*`, `MINIMAX_*`, …
   - `PPTMASTER_PYTHON_BIN` (optional manual override for the Python
     interpreter that runs `ppt-master` scripts)
-  - Loaded by `service_env()` at `app.py:136-137`.
-- **`ppt-master/.env`** — consumed by the `ppt-master` scripts the
-  service shells out to (`image_gen.py`, etc.). `app.py` does **not**
-  read this file itself. Image-backend config goes here:
-  - `IMAGE_BACKEND=agnes` (or other backend)
-  - Provider keys: `AGNES_*`, `OPENAI_*`, `GEMINI_*`, …
-  - See `ppt-master/README.md` §Configuration for the full list.
+  - Loaded by `service_env()` and injected into subprocess env for vendored scripts.
+- **`ppt-master/.env`** — compatibility fallback only:
+  - Inner scripts may still read it for image-backend keys if the root config
+    did not provide them.
+  - Keep using it only when you intentionally want a local fallback for the
+    vendored repo.
 
-Do not put image-backend keys in the root `.env`. Do not put
-`DEEPSEEK_*` keys in `ppt-master/.env`.
+Recommended practice: do **not** split LLM config and image-backend config
+across two files unless you have a specific reason.
 
 ## Python interpreter resolution
 
@@ -162,7 +171,7 @@ end-to-end automation.
   failed calls.
 - `last_run.json` — most recent step result (`status`, `result`,
   `new_files`, `new_exports`, …).
-- `agent_plan.json` — DeepSeek plan payload.
+- `agent_plan.json` — LLM plan payload.
 - `confirmation_data.json` — Strategist Eight Confirmations payload
   (`POST /tasks/{task_id}/confirmation`).
 
@@ -175,7 +184,7 @@ Allowed `file_key` values for `GET /tasks/{task_id}/files/{file_key}`
 The vendored `ppt-master/.env` currently contains a hardcoded
 `AGNES_API_KEY` (committed inside that inner git repo). Rotate the
 leaked key. Do not commit a new root `.env` containing
-`DEEPSEEK_API_KEY` or other secrets. If you must add `.env`, keep it
+`LLM_API_KEY`, `DEEPSEEK_API_KEY`, or other secrets. If you must add `.env`, keep it
 git-ignored.
 
 ## This repo deliberately does NOT have

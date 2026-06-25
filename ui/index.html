@@ -714,11 +714,11 @@
       </section>
 
       <section class="card half">
-        <h2><span class="step">3</span>DeepSeek 规划</h2>
+        <h2><span class="step">3</span>LLM 规划</h2>
         <div class="fields">
           <div class="field">
-            <label for="planModel">DeepSeek 模型</label>
-            <input id="planModel" value="deepseek-v4-pro" />
+            <label for="planModel">LLM 模型</label>
+            <input id="planModel" placeholder="留空则使用服务端 LLM_MODEL / 当前 provider 默认模型" />
           </div>
           <div class="field full">
             <label for="extraInstructions">额外规划说明</label>
@@ -1264,12 +1264,13 @@
         setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
         throw new Error("task_id 未设置");
       }
+      const planModel = $("planModel").value.trim();
       const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}/agent-plan`, {
         method: "POST",
         body: JSON.stringify({
           repo_dir: repoDir,
           task_id: taskId,
-          model: $("planModel").value.trim() || "deepseek-v4-pro",
+          ...(planModel ? { model: planModel } : {}),
           extra_instructions: $("extraInstructions").value.trim() || null,
         }),
       });
@@ -1348,6 +1349,33 @@
       return data;
     }
 
+    async function runExportPipeline() {
+      clearAllFieldErrors();
+      const repoDir = REPO_DIR;
+      const taskId = currentTaskId();
+      if (!currentTaskId()) {
+        setBanner({ kind: "error", message: "请先点击“准备任务”生成 task_id" });
+        throw new Error("task_id 未设置");
+      }
+      const source = $("exportSource").value || null;
+      const planModel = $("planModel").value.trim();
+      const data = await requestJson(`/tasks/${encodeURIComponent(taskId)}/run-pipeline`, {
+        method: "POST",
+        body: JSON.stringify({
+          repo_dir: repoDir,
+          task_id: taskId,
+          ...(planModel ? { strategist_model: planModel, svg_model: planModel } : {}),
+          max_pages: parseInt($("pageCount").value, 10) || 30,
+          source,
+          svg_snapshot: boolValue("svgSnapshot"),
+          no_merge: boolValue("noMerge"),
+        }),
+      });
+      recordHistory({ label: "POST /tasks/{id}/run-pipeline", ok: true, summary: taskId, payload: data });
+      showResponse("后端流水线结果", data, true);
+      return data;
+    }
+
     async function loadArtifacts() {
       clearAllFieldErrors();
       const repoDir = REPO_DIR;
@@ -1405,7 +1433,7 @@
           div.innerHTML = `
             <div class="name">📦 ${escapeHtml(name)}</div>
             <div class="meta">${escapeHtml(path)}</div>
-            <a href="file://${escapeHtml(path)}" target="_blank" rel="noopener">下载 (本地打开)</a>
+            <a href="/files/download?repo_dir=${encodeURIComponent(REPO_DIR)}&path=${encodeURIComponent(path)}" target="_blank" rel="noopener">下载 (本地打开)</a>
             <div class="meta">Docker 模式请 <code>docker cp ppt-master-agent:${escapeHtml(path)} ./</code></div>
           `;
           exportsRoot.appendChild(div);
@@ -1424,7 +1452,7 @@
           div.innerHTML = `
             <div class="name">${icon} ${escapeHtml(name)}</div>
             <div class="meta">${escapeHtml(path)}</div>
-            <a href="file://${escapeHtml(path)}" target="_blank" rel="noopener">打开</a>
+            <a href="/files/download?repo_dir=${encodeURIComponent(REPO_DIR)}&path=${encodeURIComponent(path)}" target="_blank" rel="noopener">打开</a>
           `;
           imagesRoot.appendChild(div);
         });
@@ -1467,7 +1495,7 @@
         throw new Error("校验未通过");
       }
       await generateImage();
-      await exportTask();
+      await runExportPipeline();
       await loadArtifacts();
     }
 
@@ -1753,7 +1781,11 @@
     bind("loadConfirmBtn", "GET /tasks/{id}/confirmation", loadConfirmation);
     bind("planBtn", "POST /tasks/{id}/agent-plan", buildPlan);
     bind("imageBtn", "POST /tasks/{id}/generate-image", generateImage);
-    bind("exportBtn", "POST /tasks/{id}/export", exportTask);
+    bind("exportBtn", "POST /tasks/{id}/run-pipeline", async () => {
+      const data = await runExportPipeline();
+      await loadArtifacts();
+      return data;
+    });
     bind("fullRunBtn", "全链路", runFullFlow);
     bind("artifactsBtn", "GET /tasks/{id}/artifacts", loadArtifacts);
     bind("runLogBtn", "GET /tasks/{id}/files/run_log", () => loadFile("run_log"));

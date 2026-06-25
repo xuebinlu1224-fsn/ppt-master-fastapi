@@ -7,11 +7,9 @@ services:
     container_name: ppt-master-agent
     ports:
       - "8080:8080"
-    # `app.py` reads DEEPSEEK_* + PPTMASTER_PYTHON_BIN from the service's
-    # own .env (or shell env). The `ppt-master/.env` consumed by the inner
-    # image_gen.py is composed in from `agent.env` and merged in via the
-    # `environment:` block below — ppt-master scripts read it from the
-    # process environment first, .env second.
+    # Single-file config: app.py reads agent.env directly, and child
+    # ppt-master scripts inherit the same env from the process. No separate
+    # ppt-master/.env is required in Docker.
     env_file:
       - ./agent.env
     environment:

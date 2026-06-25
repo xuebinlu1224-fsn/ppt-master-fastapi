@@ -6,6 +6,8 @@ import os
 import shlex
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +23,9 @@ STATE_DIR = BASE_DIR / ".service_tasks"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 TEMPLATE_STAGING_DIR = STATE_DIR / "_templates"
 TEMPLATE_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_LLM_PROVIDER = "deepseek"
+DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LLM_MODEL = "deepseek-v4-pro"
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
@@ -145,7 +148,11 @@ def list_examples_with_previews(
             ]
             _safe_print(f"[startup] rendering preview for example: {ex['example_id']}")
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=build_subprocess_env(),
             )
             if result.returncode == 0:
                 ex["render_status"] = "rendered"
@@ -229,7 +236,7 @@ class PrepareTaskRequest(BaseModel):
 class AgentPlanRequest(BaseModel):
     repo_dir: str
     task_id: str
-    model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
+    model: Optional[str] = Field(default=None)
     extra_instructions: Optional[str] = None
 
 
@@ -272,7 +279,7 @@ class StrategistRequest(BaseModel):
 
     repo_dir: str
     task_id: str
-    model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
+    model: Optional[str] = Field(default=None)
 
 
 class GenerateSvgsRequest(BaseModel):
@@ -280,8 +287,21 @@ class GenerateSvgsRequest(BaseModel):
 
     repo_dir: str
     task_id: str
-    model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
+    model: Optional[str] = Field(default=None)
     max_pages: int = Field(default=30, ge=1, le=100)
+
+
+class RunPipelineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo_dir: str
+    task_id: str
+    strategist_model: Optional[str] = Field(default=None)
+    svg_model: Optional[str] = Field(default=None)
+    max_pages: int = Field(default=30, ge=1, le=100)
+    source: Optional[Literal["output", "final"]] = None
+    svg_snapshot: bool = False
+    no_merge: bool = False
 
 
 class TemplateCreateRequest(BaseModel):
@@ -289,7 +309,7 @@ class TemplateCreateRequest(BaseModel):
 
     repo_dir: str
     template_id: str
-    model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
+    model: Optional[str] = Field(default=None)
 
 
 class TaskStatusResponse(BaseModel):
@@ -350,13 +370,33 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def root_config_env() -> dict[str, str]:
+    """Return merged root-level config from agent.env and .env.
+
+    Precedence matches service_env(): process env > .env > agent.env.
+    This helper only returns file-backed values, so callers should merge it
+    under os.environ with setdefault semantics.
+    """
+    values: dict[str, str] = {}
+    for path in (BASE_DIR / "agent.env", BASE_DIR / ".env"):
+        values.update(read_env_file(path))
+    return values
+
+
 def service_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return (
         os.environ.get(name)
-        or read_env_file(BASE_DIR / ".env").get(name)
-        or read_env_file(BASE_DIR / "agent.env").get(name)
+        or root_config_env().get(name)
         or default
     )
+
+
+def service_env_first(*names: str, default: Optional[str] = None) -> Optional[str]:
+    for name in names:
+        value = service_env(name)
+        if value:
+            return value
+    return default
 
 
 def build_task_id(custom_task_id: Optional[str]) -> str:
@@ -393,6 +433,17 @@ def resolve_repo_path(repo_dir: Path, raw_path: str) -> Path:
     return resolved
 
 
+def resolve_download_path(repo_dir: Path, raw_path: str) -> Path:
+    candidate = Path(raw_path)
+    resolved = (candidate if candidate.is_absolute() else repo_dir / candidate).expanduser().resolve()
+    allowed_roots = (repo_dir, STATE_DIR.resolve())
+    if not any(root == resolved or root in resolved.parents for root in allowed_roots):
+        raise HTTPException(status_code=400, detail=f"Path escapes allowed download roots: {raw_path}")
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return resolved
+
+
 def resolve_python_bin() -> str:
     configured = service_env("PPTMASTER_PYTHON_BIN")
     project_venv_candidates = [
@@ -412,6 +463,17 @@ def resolve_python_bin() -> str:
         if candidate and Path(candidate).exists():
             return str(Path(candidate))
     raise HTTPException(status_code=500, detail="No usable Python interpreter found for ppt-master scripts.")
+
+
+def build_subprocess_env(extra_env: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Build child-process env with root config available to vendored scripts."""
+    env = os.environ.copy()
+    for key, value in root_config_env().items():
+        env.setdefault(key, value)
+    env["PYTHONUNBUFFERED"] = "1"
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
 def script_path(repo_dir: Path, script_name: str) -> Path:
@@ -506,17 +568,13 @@ def run_logged_command(
     extra_env: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     paths["run_log_file"].parent.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if extra_env:
-        env.update(extra_env)
     completed = subprocess.run(
         command,
         cwd=repo_dir,
         capture_output=True,
         text=True,
         check=False,
-        env=env,
+        env=build_subprocess_env(extra_env),
     )
     append_run_log(paths["run_log_file"], label, command, completed)
     return {
@@ -537,17 +595,13 @@ def run_logged_command_simple(
     extra_env: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if extra_env:
-        env.update(extra_env)
     completed = subprocess.run(
         command,
         cwd=repo_dir,
         capture_output=True,
         text=True,
         check=False,
-        env=env,
+        env=build_subprocess_env(extra_env),
     )
     append_run_log(log_path, label, command, completed)
     return {
@@ -638,6 +692,242 @@ def read_template_design_spec(repo_dir: Path, template_id: str) -> Optional[str]
     if spec_path.exists():
         return spec_path.read_text(encoding="utf-8")
     return None
+
+
+def execute_strategist(task_id: str, repo_dir: Path, model: str) -> dict[str, Any]:
+    paths, metadata, project_dir = ensure_task(repo_dir, task_id)
+    project_state = build_project_state(project_dir)
+    task_prompt = metadata.get("user_prompt", "")
+    canvas_format = metadata.get("canvas_format", "ppt169")
+
+    template_id = metadata.get("template_id")
+    template_design_spec = None
+    if template_id:
+        template_design_spec = read_template_design_spec(repo_dir, template_id)
+
+    strat_result = call_llm_strategist(
+        task_prompt=task_prompt,
+        canvas_format=canvas_format,
+        project_state=project_state,
+        model=model,
+        template_design_spec=template_design_spec,
+    )
+    design_spec_path = project_dir / "design_spec.md"
+    spec_lock_path = project_dir / "spec_lock.md"
+    design_spec_path.write_text(strat_result["design_spec_md"], encoding="utf-8")
+    spec_lock_path.write_text(strat_result["spec_lock_md"], encoding="utf-8")
+
+    payload = {
+        "status": "ok",
+        "task_id": task_id,
+        "step": "strategist",
+        "design_spec_path": str(design_spec_path),
+        "spec_lock_path": str(spec_lock_path),
+        "design_spec_size": len(strat_result["design_spec_md"]),
+        "spec_lock_size": len(strat_result["spec_lock_md"]),
+        "template_applied": bool(template_id),
+    }
+    persist_last_run(paths, payload)
+    return payload
+
+
+def execute_generate_svgs(task_id: str, repo_dir: Path, model: str, max_pages: int) -> dict[str, Any]:
+    paths, metadata, project_dir = ensure_task(repo_dir, task_id)
+
+    spec_lock_path = project_dir / "spec_lock.md"
+    if not spec_lock_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "task_id": task_id,
+                "message": "spec_lock.md is required before SVG generation. Run /strategist first.",
+                "missing_requirements": ["spec_lock.md"],
+            },
+        )
+
+    design_spec_path = project_dir / "design_spec.md"
+    design_spec_md = design_spec_path.read_text(encoding="utf-8") if design_spec_path.exists() else ""
+
+    svg_output_dir = project_dir / "svg_output"
+    svg_output_dir.mkdir(parents=True, exist_ok=True)
+
+    templates_dir = project_dir / "templates"
+    template_svgs: dict[str, str] = {}
+    if templates_dir.exists():
+        for svg_file in sorted(templates_dir.glob("*.svg")):
+            template_svgs[svg_file.name] = svg_file.read_text(encoding="utf-8")
+
+    def _match_template_svg(page_meta: dict[str, Any]) -> Optional[str]:
+        if not template_svgs:
+            return None
+        rhythm = page_meta.get("rhythm", "")
+        layout = page_meta.get("layout", "")
+        for name, content in template_svgs.items():
+            name_lower = name.lower()
+            if rhythm and rhythm.lower() in name_lower:
+                return content
+            if layout and layout.lower() in name_lower:
+                return content
+        svg_names = sorted(template_svgs.keys())
+        pid_str = page_meta.get("page", "")
+        idx = int(pid_str[1:]) - 1 if pid_str and pid_str[1:].isdigit() else -1
+        if idx == 0 and svg_names:
+            return template_svgs[svg_names[0]]
+        return None
+
+    spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
+    pages = parse_spec_lock_pages(spec_lock_md)
+    if not pages:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "task_id": task_id,
+                "message": "Could not parse any page entries from spec_lock.md. "
+                "Check that spec_lock.md has page_rhythm, page_layouts, or content_outline sections.",
+            },
+        )
+
+    pages = pages[: min(len(pages), max_pages)]
+
+    generated: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for page_meta in pages:
+        page_id = page_meta["page"]
+        svg_path = svg_output_dir / f"{page_id.lower()}_{page_meta.get('rhythm', 'slide')}.svg"
+        try:
+            spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
+            tpl_svg = _match_template_svg(page_meta)
+            svg_text = call_llm_svg_page(
+                spec_lock_md=spec_lock_md,
+                page_meta=page_meta,
+                design_spec_md=design_spec_md,
+                model=model,
+                template_svg=tpl_svg,
+            )
+            valid, error = validate_minimal_svg(svg_text)
+            if not valid:
+                spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
+                svg_text = call_llm_svg_page(
+                    spec_lock_md=spec_lock_md,
+                    page_meta=page_meta,
+                    design_spec_md=design_spec_md,
+                    model=model,
+                    template_svg=tpl_svg,
+                )
+                valid, error = validate_minimal_svg(svg_text)
+            if not valid:
+                failed.append({"page": page_id, "reason": f"SVG validation failed after retry: {error}"})
+                continue
+            svg_path.write_text(svg_text, encoding="utf-8")
+            generated.append({"page": page_id, "file": str(svg_path), "rhythm": page_meta.get("rhythm")})
+        except Exception as exc:
+            failed.append({"page": page_id, "reason": str(exc)})
+
+    python_bin = resolve_python_bin()
+    quality_checker = script_path(repo_dir, "svg_quality_checker.py")
+    quality_result = run_logged_command(
+        repo_dir=repo_dir,
+        paths=paths,
+        label="svg_quality_checker",
+        command=[python_bin, str(quality_checker), str(project_dir)],
+    )
+
+    payload = {
+        "status": "ok" if not failed else "partial",
+        "step": "generate-svgs",
+        "task_id": task_id,
+        "pages_generated": len(generated),
+        "pages_failed": len(failed),
+        "generated": generated,
+        "failed": failed,
+        "quality_report": quality_result,
+        "svg_output_dir": str(svg_output_dir),
+    }
+    persist_last_run(paths, payload)
+    return payload
+
+
+def execute_export_task(
+    task_id: str,
+    repo_dir: Path,
+    source: Optional[Literal["output", "final"]],
+    svg_snapshot: bool,
+    no_merge: bool,
+) -> dict[str, Any]:
+    paths, _, project_dir = ensure_task(repo_dir, task_id)
+    python_bin = resolve_python_bin()
+    readiness = build_export_readiness(project_dir)
+    if not readiness["ready_for_export"]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "task_id": task_id,
+                "message": "Project is not ready for export.",
+                "missing_requirements": readiness["missing_requirements"],
+                "project_state": readiness["project_state"],
+            },
+        )
+
+    total_md_split = script_path(repo_dir, "total_md_split.py")
+    finalize_svg = script_path(repo_dir, "finalize_svg.py")
+    svg_to_pptx = script_path(repo_dir, "svg_to_pptx.py")
+
+    before_exports = set(list_exports(project_dir))
+    steps = [
+        run_logged_command(
+            repo_dir=repo_dir,
+            paths=paths,
+            label="export:total_md_split",
+            command=[python_bin, str(total_md_split), str(project_dir)],
+        ),
+        run_logged_command(
+            repo_dir=repo_dir,
+            paths=paths,
+            label="export:finalize_svg",
+            command=[python_bin, str(finalize_svg), str(project_dir)],
+        ),
+    ]
+
+    export_command = [python_bin, str(svg_to_pptx), str(project_dir)]
+    if source:
+        export_command.extend(["-s", source])
+    if svg_snapshot:
+        export_command.append("--svg-snapshot")
+    if no_merge:
+        export_command.append("--no-merge")
+    steps.append(
+        run_logged_command(
+            repo_dir=repo_dir,
+            paths=paths,
+            label="export:svg_to_pptx",
+            command=export_command,
+        )
+    )
+
+    status = "ok"
+    for step in steps:
+        if step["return_code"] != 0:
+            if step["label"] == "export:total_md_split":
+                step["note"] = "total_md_split failed (speaker notes missing) — non-blocking"
+                continue
+            status = "error"
+            break
+
+    after_exports = set(list_exports(project_dir))
+    payload = {
+        "status": status,
+        "task_id": task_id,
+        "steps": steps,
+        "new_exports": sorted(after_exports - before_exports),
+        "all_exports": sorted(after_exports),
+    }
+    persist_last_run(paths, payload)
+    if status != "ok":
+        raise HTTPException(status_code=500, detail=payload)
+    return payload
 
 
 def copy_template_to_project(repo_dir: Path, template_id: str, project_dir: Path) -> bool:
@@ -863,7 +1153,7 @@ def create_registered_template_from_staging(
                     "note": "first slide" if i == 0 else "last slide" if i == len(svg_list) - 1 else "middle slide",
                 })
 
-    result = call_deepseek_template_creator(
+    result = call_llm_template_creator(
         manifest_json=manifest_json,
         identity_json=identity_json,
         svg_samples=svg_samples,
@@ -921,28 +1211,275 @@ def create_registered_template_from_staging(
         "source": source,
     }
 
-# --- DeepSeek clients ---
+# --- LLM clients ---
 
-def _get_deepseek_client() -> "OpenAI":
-    api_key = service_env("DEEPSEEK_API_KEY")
+def _get_llm_config() -> dict[str, str]:
+    provider = service_env_first("LLM_PROVIDER", default=DEFAULT_LLM_PROVIDER) or DEFAULT_LLM_PROVIDER
+    provider = provider.strip().lower()
+
+    api_key = service_env_first("LLM_API_KEY", "DEEPSEEK_API_KEY")
+    if not api_key and provider == "minimax":
+        api_key = service_env("MINIMAX_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing DEEPSEEK_API_KEY in service environment or .env.")
-    base_url = service_env("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Missing LLM API key in service environment or .env. "
+                "Set LLM_API_KEY (recommended) or keep using legacy DEEPSEEK_API_KEY."
+            ),
+        )
+
+    base_url = service_env_first("LLM_BASE_URL", "DEEPSEEK_BASE_URL", default=DEFAULT_LLM_BASE_URL)
+    if provider == "minimax":
+        base_url = service_env_first(
+            "LLM_BASE_URL",
+            "MINIMAX_LLM_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+            default="https://api.minimaxi.com/v1",
+        )
+
+    default_model = service_env_first("LLM_MODEL", "DEEPSEEK_MODEL", default=DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL
+    if provider == "minimax":
+        default_model = service_env_first(
+            "LLM_MODEL",
+            "MINIMAX_LLM_MODEL",
+            "DEEPSEEK_MODEL",
+            default="MiniMax-M3",
+        ) or "MiniMax-M3"
+
+    return {
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url,
+        "default_model": default_model,
+    }
+
+
+def _get_llm_client() -> tuple["OpenAI", dict[str, str]]:
+    config = _get_llm_config()
     try:
         from openai import OpenAI
     except ImportError as exc:
         raise HTTPException(status_code=500, detail="Missing dependency: openai") from exc
-    return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=config["api_key"], base_url=config["base_url"]), config
 
 
-def call_deepseek_strategist(
+def _resolve_requested_model(config: dict[str, str], requested_model: Optional[str]) -> str:
+    default_model = config["default_model"]
+    if not requested_model or not requested_model.strip():
+        return default_model
+
+    candidate = requested_model.strip()
+    provider = config["provider"]
+    lowered = candidate.lower()
+
+    # Guard against stale UI / caller defaults leaking a model from another provider.
+    if provider == "minimax" and lowered.startswith("deepseek"):
+        return default_model
+    if provider == "deepseek" and lowered.startswith("minimax"):
+        return default_model
+
+    return candidate
+
+
+def _extract_json_object_text(raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    if not text:
+        raise ValueError("empty response content")
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object start found")
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+
+    raise ValueError("no complete JSON object found")
+
+
+def _parse_model_json_content(raw_text: str, provider: str, label: str) -> dict[str, Any]:
+    try:
+        return json.loads(_extract_json_object_text(raw_text))
+    except (json.JSONDecodeError, ValueError) as exc:
+        preview = (raw_text or "")[:1200]
+        raise HTTPException(
+            status_code=500,
+            detail=f"{provider} {label} did not return valid JSON content: {exc}. Raw={preview}",
+        ) from exc
+
+
+def _resolve_minimax_llm_url(base_url: str) -> str:
+    override = service_env("MINIMAX_LLM_ENDPOINT")
+    if override:
+        return override.rstrip("/")
+    base = base_url.rstrip("/")
+    if base.endswith("/chatcompletion_v2"):
+        return base
+    if base.endswith("/v1/text"):
+        return base + "/chatcompletion_v2"
+    if base.endswith("/v1"):
+        return base + "/text/chatcompletion_v2"
+    return base + "/v1/text/chatcompletion_v2"
+
+
+def _extract_minimax_text(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("reply"), str) and payload["reply"].strip():
+        return payload["reply"]
+
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
+            messages = first.get("messages")
+            if isinstance(messages, list) and messages:
+                first_message = messages[0]
+                if isinstance(first_message, dict):
+                    text = first_message.get("text")
+                    if isinstance(text, str) and text.strip():
+                        return text
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        if isinstance(data.get("reply"), str) and data["reply"].strip():
+            return data["reply"]
+        if isinstance(data.get("text"), str) and data["text"].strip():
+            return data["text"]
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"MiniMax response missing text payload: {json.dumps(payload, ensure_ascii=False)[:1200]}",
+    )
+
+
+def _call_minimax_text_api(
+    *,
+    config: dict[str, str],
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> dict[str, Any]:
+    url = _resolve_minimax_llm_url(config["base_url"])
+    prompt_text = (
+        "System Instructions:\n"
+        f"{system_prompt.strip()}\n\n"
+        "User Input:\n"
+        f"{user_prompt.strip()}"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "sender_type": "USER",
+                "sender_name": "user",
+                "text": prompt_text,
+            }
+        ],
+        "reply_constraints": {
+            "sender_type": "BOT",
+            "sender_name": "assistant",
+        },
+        "tokens_to_generate": 4096,
+        "temperature": 0.2,
+        "thinking": {"type": "disabled"},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {config['api_key']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"MiniMax HTTP {exc.code} calling {url}. "
+                f"Model={model}. Response={error_body[:1200]}"
+            ),
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"MiniMax request failed for {url}: {exc.reason}",
+        ) from exc
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"MiniMax did not return valid JSON from {url}: {body[:1200]}",
+        ) from exc
+
+    base_resp = parsed.get("base_resp")
+    if isinstance(base_resp, dict):
+        status_code = base_resp.get("status_code")
+        if status_code not in (None, 0, "0"):
+            raise HTTPException(
+                status_code=500,
+                detail=f"MiniMax API error from {url}: {json.dumps(parsed, ensure_ascii=False)[:1200]}",
+            )
+
+    text = _extract_minimax_text(parsed)
+    usage = parsed.get("usage")
+    return {
+        "content": text,
+        "usage": usage if isinstance(usage, dict) else None,
+        "raw": parsed,
+        "url": url,
+    }
+
+
+def call_llm_strategist(
     task_prompt: str,
     canvas_format: str,
     project_state: dict[str, Any],
     model: str,
     template_design_spec: Optional[str] = None,
 ) -> dict[str, str]:
-    client = _get_deepseek_client()
+    client, config = _get_llm_client()
+    resolved_model = _resolve_requested_model(config, model)
     template_block = ""
     if template_design_spec:
         template_block = (
@@ -1016,7 +1553,7 @@ def call_deepseek_strategist(
         indent=2,
     )
     response = client.chat.completions.create(
-        model=model,
+        model=resolved_model,
         messages=[
             {"role": "system", "content": system_prompt + template_block},
             {"role": "user", "content": user_message},
@@ -1025,10 +1562,7 @@ def call_deepseek_strategist(
         response_format={"type": "json_object"},
     )
     content = response.choices[0].message.content or "{}"
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail=f"DeepSeek strategist did not return valid JSON: {exc}") from exc
+    parsed = _parse_model_json_content(content, config["provider"], "strategist")
     if not isinstance(parsed.get("design_spec_md"), str) or not isinstance(parsed.get("spec_lock_md"), str):
         raise HTTPException(status_code=500, detail="Strategist response missing design_spec_md or spec_lock_md fields.")
     return {
@@ -1037,13 +1571,14 @@ def call_deepseek_strategist(
     }
 
 
-def call_deepseek_template_creator(
+def call_llm_template_creator(
     manifest_json: str,
     identity_json: str,
     svg_samples: list[dict[str, str]],
     model: str,
 ) -> dict[str, str]:
-    client = _get_deepseek_client()
+    client, config = _get_llm_client()
+    resolved_model = _resolve_requested_model(config, model)
     svg_sample_block = ""
     for sample in svg_samples:
         svg_sample_block += f"\n\n### {sample['name']}\n```svg\n{sample['content'][:3000]}\n```\n"
@@ -1093,7 +1628,7 @@ def call_deepseek_template_creator(
         indent=2,
     )
     response = client.chat.completions.create(
-        model=model,
+        model=resolved_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": svg_sample_block + "\n\n" + user_message},
@@ -1102,10 +1637,7 @@ def call_deepseek_template_creator(
         response_format={"type": "json_object"},
     )
     content = response.choices[0].message.content or "{}"
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail=f"DeepSeek template creator did not return valid JSON: {exc}") from exc
+    parsed = _parse_model_json_content(content, config["provider"], "template creator")
     if not isinstance(parsed.get("design_spec_md"), str):
         raise HTTPException(status_code=500, detail="Template creator response missing design_spec_md field.")
     return {
@@ -1188,14 +1720,15 @@ def _extract_section(md_text: str, section_name: str) -> str:
     return md_text[start:end]
 
 
-def call_deepseek_svg_page(
+def call_llm_svg_page(
     spec_lock_md: str,
     page_meta: dict[str, Any],
     design_spec_md: str,
     model: str,
     template_svg: Optional[str] = None,
 ) -> str:
-    client = _get_deepseek_client()
+    client, config = _get_llm_client()
+    resolved_model = _resolve_requested_model(config, model)
     page_id = page_meta.get("page", "unknown")
     rhythm = page_meta.get("rhythm", "dense")
     layout = page_meta.get("layout", "")
@@ -1241,7 +1774,7 @@ def call_deepseek_svg_page(
         "Generate the SVG for this page now. Output only the <svg> element."
     )
     response = client.chat.completions.create(
-        model=model,
+        model=resolved_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -1274,18 +1807,9 @@ def validate_minimal_svg(svg: str) -> tuple[bool, str]:
     return True, ""
 
 
-def call_deepseek_plan(request: AgentPlanRequest, repo_dir: Path, metadata: dict[str, Any], project_state: dict[str, Any]) -> dict[str, Any]:
-    api_key = service_env("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing DEEPSEEK_API_KEY in service environment or .env.")
-    base_url = service_env("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL)
-
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="Missing dependency: openai") from exc
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
+def call_llm_plan(request: AgentPlanRequest, repo_dir: Path, metadata: dict[str, Any], project_state: dict[str, Any]) -> dict[str, Any]:
+    client, config = _get_llm_client()
+    resolved_model = _resolve_requested_model(config, request.model)
     system_prompt = (
         "You are the orchestration planner for a local ppt-master API service. "
         "Return strict JSON only. Do not invent completed work. "
@@ -1306,6 +1830,7 @@ def call_deepseek_plan(request: AgentPlanRequest, repo_dir: Path, metadata: dict
             "POST /tasks/{task_id}/strategist",
             "POST /tasks/{task_id}/generate-image",
             "POST /tasks/{task_id}/generate-svgs",
+            "POST /tasks/{task_id}/run-pipeline",
             "POST /tasks/{task_id}/export",
             "GET /tasks/{task_id}/readiness",
             "GET /tasks/{task_id}",
@@ -1339,7 +1864,7 @@ def call_deepseek_plan(request: AgentPlanRequest, repo_dir: Path, metadata: dict
         },
     }
     response = client.chat.completions.create(
-        model=request.model,
+        model=resolved_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
@@ -1348,15 +1873,12 @@ def call_deepseek_plan(request: AgentPlanRequest, repo_dir: Path, metadata: dict
         response_format={"type": "json_object"},
     )
     content = response.choices[0].message.content or "{}"
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail=f"DeepSeek did not return valid JSON: {exc}") from exc
+    parsed = _parse_model_json_content(content, config["provider"], "plan")
     usage = getattr(response, "usage", None)
     return {
-        "provider": "deepseek",
-        "model": request.model,
-        "base_url": base_url,
+        "provider": config["provider"],
+        "model": resolved_model,
+        "base_url": config["base_url"],
         "generated_at": datetime.now().isoformat(),
         "plan": parsed,
         "usage": usage.model_dump() if usage else None,
@@ -1404,7 +1926,7 @@ async def upload_official_template(
     repo_dir: str = Form(...),
     file: UploadFile = File(...),
     template_id: Optional[str] = Form(None),
-    model: str = Form(DEFAULT_DEEPSEEK_MODEL),
+    model: Optional[str] = Form(None),
 ) -> dict[str, Any]:
     repo = ensure_repo_dir(Path(repo_dir))
     _validate_uploaded_template_file(file)
@@ -1530,7 +2052,11 @@ def render_template_preview_endpoint(
     _safe_print(f"[render-preview] template={template_id} cmd={' '.join(cmd)}")
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=build_subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Preview render timed out")
@@ -1627,7 +2153,13 @@ def delete_template(template_id: str, repo_dir: str) -> dict[str, Any]:
 
     python_bin = resolve_python_bin()
     register_cmd = [python_bin, str(script_path(repo, "register_template.py")), "--kind", "deck", "--rebuild-all"]
-    subprocess.run(register_cmd, cwd=repo, capture_output=True, text=True)
+    subprocess.run(
+        register_cmd,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=build_subprocess_env(),
+    )
 
     return {"template_id": template_id, "deleted": deleted, "status": "ok"}
 
@@ -1667,7 +2199,7 @@ def prepare_task(request: PrepareTaskRequest) -> TaskStatusResponse:
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env=build_subprocess_env(),
     )
     init_result = {
         "label": "project_manager:init",
@@ -1718,7 +2250,7 @@ def build_agent_plan(task_id: str, request: AgentPlanRequest) -> dict[str, Any]:
     repo_dir = ensure_repo_dir(Path(request.repo_dir))
     paths, metadata, project_dir = ensure_task(repo_dir, task_id)
     project_state = build_project_state(project_dir)
-    plan_payload = call_deepseek_plan(request, repo_dir, metadata, project_state)
+    plan_payload = call_llm_plan(request, repo_dir, metadata, project_state)
     paths["plan_file"].write_text(json.dumps(plan_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     persist_last_run(paths, {"status": "ok", "step": "agent-plan", "plan_file": str(paths["plan_file"])})
     return plan_payload
@@ -1835,77 +2367,56 @@ def export_task(task_id: str, request: ExportTaskRequest) -> dict[str, Any]:
     if request.task_id != task_id:
         raise HTTPException(status_code=400, detail="Path task_id does not match request body task_id.")
     repo_dir = ensure_repo_dir(Path(request.repo_dir))
+    return execute_export_task(task_id, repo_dir, request.source, request.svg_snapshot, request.no_merge)
+
+
+@app.post("/tasks/{task_id}/run-pipeline")
+def run_pipeline(task_id: str, request: RunPipelineRequest) -> dict[str, Any]:
+    if request.task_id != task_id:
+        raise HTTPException(status_code=400, detail="Path task_id does not match request body task_id.")
+    repo_dir = ensure_repo_dir(Path(request.repo_dir))
     paths, _, project_dir = ensure_task(repo_dir, task_id)
-    python_bin = resolve_python_bin()
-    readiness = build_export_readiness(project_dir)
-    if not readiness["ready_for_export"]:
-        raise HTTPException(
-            status_code=400,
-            detail={
+
+    before_state = build_project_state(project_dir)
+    steps: list[dict[str, Any]] = []
+
+    if not before_state["design_spec_exists"] or not before_state["spec_lock_exists"]:
+        steps.append(
+            {
+                "step": "strategist",
+                "result": execute_strategist(task_id, repo_dir, request.strategist_model),
+            }
+        )
+
+    readiness_after_strategist = build_export_readiness(project_dir)
+    if "svg_output/*.svg" in readiness_after_strategist["missing_requirements"]:
+        svg_result = execute_generate_svgs(task_id, repo_dir, request.svg_model, request.max_pages)
+        steps.append({"step": "generate-svgs", "result": svg_result})
+        if svg_result["status"] != "ok":
+            payload = {
                 "status": "error",
                 "task_id": task_id,
-                "message": "Project is not ready for export.",
-                "missing_requirements": readiness["missing_requirements"],
-                "project_state": readiness["project_state"],
-            },
-        )
+                "message": "SVG generation did not complete for all pages.",
+                "steps": steps,
+                "project_state": build_project_state(project_dir),
+            }
+            persist_last_run(paths, payload)
+            raise HTTPException(status_code=500, detail=payload)
 
-    total_md_split = script_path(repo_dir, "total_md_split.py")
-    finalize_svg = script_path(repo_dir, "finalize_svg.py")
-    svg_to_pptx = script_path(repo_dir, "svg_to_pptx.py")
+    export_result = execute_export_task(task_id, repo_dir, request.source, request.svg_snapshot, request.no_merge)
+    steps.append({"step": "export", "result": export_result})
 
-    before_exports = set(list_exports(project_dir))
-    steps = [
-        run_logged_command(
-            repo_dir=repo_dir,
-            paths=paths,
-            label="export:total_md_split",
-            command=[python_bin, str(total_md_split), str(project_dir)],
-        ),
-        run_logged_command(
-            repo_dir=repo_dir,
-            paths=paths,
-            label="export:finalize_svg",
-            command=[python_bin, str(finalize_svg), str(project_dir)],
-        ),
-    ]
-
-    export_command = [python_bin, str(svg_to_pptx), str(project_dir)]
-    if request.source:
-        export_command.extend(["-s", request.source])
-    if request.svg_snapshot:
-        export_command.append("--svg-snapshot")
-    if request.no_merge:
-        export_command.append("--no-merge")
-    steps.append(
-        run_logged_command(
-            repo_dir=repo_dir,
-            paths=paths,
-            label="export:svg_to_pptx",
-            command=export_command,
-        )
-    )
-
-    status = "ok"
-    for step in steps:
-        if step["return_code"] != 0:
-            if step["label"] == "export:total_md_split":
-                step["note"] = "total_md_split failed (speaker notes missing) — non-blocking"
-                continue
-            status = "error"
-            break
-
-    after_exports = set(list_exports(project_dir))
     payload = {
-        "status": status,
+        "status": "ok",
         "task_id": task_id,
+        "step": "run-pipeline",
         "steps": steps,
-        "new_exports": sorted(after_exports - before_exports),
-        "all_exports": sorted(after_exports),
+        "project_state_before": before_state,
+        "project_state_after": build_project_state(project_dir),
+        "new_exports": export_result["new_exports"],
+        "all_exports": export_result["all_exports"],
     }
     persist_last_run(paths, payload)
-    if status != "ok":
-        raise HTTPException(status_code=500, detail=payload)
     return payload
 
 
@@ -1914,40 +2425,7 @@ def run_strategist(task_id: str, request: StrategistRequest) -> dict[str, Any]:
     if request.task_id != task_id:
         raise HTTPException(status_code=400, detail="Path task_id does not match request body task_id.")
     repo_dir = ensure_repo_dir(Path(request.repo_dir))
-    paths, metadata, project_dir = ensure_task(repo_dir, task_id)
-    project_state = build_project_state(project_dir)
-    task_prompt = metadata.get("user_prompt", "")
-    canvas_format = metadata.get("canvas_format", "ppt169")
-
-    template_id = metadata.get("template_id")
-    template_design_spec = None
-    if template_id:
-        template_design_spec = read_template_design_spec(repo_dir, template_id)
-
-    strat_result = call_deepseek_strategist(
-        task_prompt=task_prompt,
-        canvas_format=canvas_format,
-        project_state=project_state,
-        model=request.model,
-        template_design_spec=template_design_spec,
-    )
-    design_spec_path = project_dir / "design_spec.md"
-    spec_lock_path = project_dir / "spec_lock.md"
-    design_spec_path.write_text(strat_result["design_spec_md"], encoding="utf-8")
-    spec_lock_path.write_text(strat_result["spec_lock_md"], encoding="utf-8")
-
-    payload = {
-        "status": "ok",
-        "task_id": task_id,
-        "step": "strategist",
-        "design_spec_path": str(design_spec_path),
-        "spec_lock_path": str(spec_lock_path),
-        "design_spec_size": len(strat_result["design_spec_md"]),
-        "spec_lock_size": len(strat_result["spec_lock_md"]),
-        "template_applied": bool(template_id),
-    }
-    persist_last_run(paths, payload)
-    return payload
+    return execute_strategist(task_id, repo_dir, request.model)
 
 
 @app.post("/tasks/{task_id}/generate-svgs")
@@ -1955,122 +2433,7 @@ def generate_svgs(task_id: str, request: GenerateSvgsRequest) -> dict[str, Any]:
     if request.task_id != task_id:
         raise HTTPException(status_code=400, detail="Path task_id does not match request body task_id.")
     repo_dir = ensure_repo_dir(Path(request.repo_dir))
-    paths, metadata, project_dir = ensure_task(repo_dir, task_id)
-
-    spec_lock_path = project_dir / "spec_lock.md"
-    if not spec_lock_path.exists():
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "status": "error",
-                "task_id": task_id,
-                "message": "spec_lock.md is required before SVG generation. Run /strategist first.",
-                "missing_requirements": ["spec_lock.md"],
-            },
-        )
-
-    design_spec_path = project_dir / "design_spec.md"
-    design_spec_md = design_spec_path.read_text(encoding="utf-8") if design_spec_path.exists() else ""
-
-    svg_output_dir = project_dir / "svg_output"
-    svg_output_dir.mkdir(parents=True, exist_ok=True)
-
-    templates_dir = project_dir / "templates"
-    template_svgs: dict[str, str] = {}
-    if templates_dir.exists():
-        for svg_file in sorted(templates_dir.glob("*.svg")):
-            template_svgs[svg_file.name] = svg_file.read_text(encoding="utf-8")
-
-    def _match_template_svg(page_meta: dict[str, Any]) -> Optional[str]:
-        if not template_svgs:
-            return None
-        rhythm = page_meta.get("rhythm", "")
-        layout = page_meta.get("layout", "")
-        for name, content in template_svgs.items():
-            name_lower = name.lower()
-            if rhythm and rhythm.lower() in name_lower:
-                return content
-            if layout and layout.lower() in name_lower:
-                return content
-        svg_names = sorted(template_svgs.keys())
-        pid_str = page_meta.get("page", "")
-        idx = int(pid_str[1:]) - 1 if pid_str and pid_str[1:].isdigit() else -1
-        if idx == 0 and svg_names:
-            return template_svgs[svg_names[0]]
-        return None
-
-    spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
-    pages = parse_spec_lock_pages(spec_lock_md)
-    if not pages:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "status": "error",
-                "task_id": task_id,
-                "message": "Could not parse any page entries from spec_lock.md. "
-                "Check that spec_lock.md has page_rhythm, page_layouts, or content_outline sections.",
-            },
-        )
-
-    max_pages = min(len(pages), request.max_pages)
-    pages = pages[:max_pages]
-
-    generated: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
-    for page_meta in pages:
-        page_id = page_meta["page"]
-        svg_path = svg_output_dir / f"{page_id.lower()}_{page_meta.get('rhythm', 'slide')}.svg"
-        try:
-            spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
-            tpl_svg = _match_template_svg(page_meta)
-            svg_text = call_deepseek_svg_page(
-                spec_lock_md=spec_lock_md,
-                page_meta=page_meta,
-                design_spec_md=design_spec_md,
-                model=request.model,
-                template_svg=tpl_svg,
-            )
-            valid, error = validate_minimal_svg(svg_text)
-            if not valid:
-                spec_lock_md = spec_lock_path.read_text(encoding="utf-8")
-                svg_text = call_deepseek_svg_page(
-                    spec_lock_md=spec_lock_md,
-                    page_meta=page_meta,
-                    design_spec_md=design_spec_md,
-                    model=request.model,
-                    template_svg=tpl_svg,
-                )
-                valid, error = validate_minimal_svg(svg_text)
-            if not valid:
-                failed.append({"page": page_id, "reason": f"SVG validation failed after retry: {error}"})
-                continue
-            svg_path.write_text(svg_text, encoding="utf-8")
-            generated.append({"page": page_id, "file": str(svg_path), "rhythm": page_meta.get("rhythm")})
-        except Exception as exc:
-            failed.append({"page": page_id, "reason": str(exc)})
-
-    python_bin = resolve_python_bin()
-    quality_checker = script_path(repo_dir, "svg_quality_checker.py")
-    quality_result = run_logged_command(
-        repo_dir=repo_dir,
-        paths=paths,
-        label="svg_quality_checker",
-        command=[python_bin, str(quality_checker), str(project_dir)],
-    )
-
-    payload = {
-        "status": "ok" if not failed else "partial",
-        "step": "generate-svgs",
-        "task_id": task_id,
-        "pages_generated": len(generated),
-        "pages_failed": len(failed),
-        "generated": generated,
-        "failed": failed,
-        "quality_report": quality_result,
-        "svg_output_dir": str(svg_output_dir),
-    }
-    persist_last_run(paths, payload)
-    return payload
+    return execute_generate_svgs(task_id, repo_dir, request.model, request.max_pages)
 
 
 @app.get("/tasks/{task_id}/readiness")
@@ -2156,4 +2519,15 @@ def get_task_file(task_id: str, file_key: str, repo_dir: str) -> TaskFileRespons
         file_key=file_key,
         path=str(file_path),
         content=file_path.read_text(encoding="utf-8"),
+    )
+
+
+@app.get("/files/download")
+def download_file(repo_dir: str, path: str):
+    repo = ensure_repo_dir(Path(repo_dir))
+    file_path = resolve_download_path(repo, path)
+    return FileResponse(
+        file_path,
+        media_type="application/octet-stream",
+        filename=file_path.name,
     )

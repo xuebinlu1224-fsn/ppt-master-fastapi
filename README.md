@@ -4,7 +4,7 @@
 
 它的定位现在是：
 
-- 外层服务负责任务管理、DeepSeek 规划、HTTP API
+- 外层服务负责任务管理、LLM 规划、HTTP API
 - `ppt-master` 负责真正的 PPT 能力
 - 外层服务不再自己维护独立生图/导出实现，而是直接调用 `ppt-master` 官方脚本
 
@@ -16,13 +16,20 @@
 
 - `POST /tasks/{task_id}/agent-plan`
   - 读取任务状态
-  - 调用 DeepSeek 生成下一步编排建议
-  - DeepSeek 配置放在外层服务
+  - 调用外层配置的 LLM 生成下一步编排建议
+  - LLM 配置放在外层服务
 
 - `POST /tasks/{task_id}/generate-image`
   - 直接调用 `ppt-master/skills/ppt-master/scripts/image_gen.py`
   - 使用 `ppt-master` 自己的 `.env` 和后端体系
-  - Agnes 配置只需要放在 `ppt-master/.env`
+  - `minimax` / Agnes 等生图配置只需要放在 `ppt-master/.env`
+
+- `POST /tasks/{task_id}/run-pipeline`
+  - 后端统一编排导出前置链路
+  - 按需自动执行：
+    - `strategist` 生成 `design_spec.md` + `spec_lock.md`
+    - `generate-svgs` 生成 `svg_output/*.svg`
+    - `export` 导出 PPTX
 
 - `POST /tasks/{task_id}/export`
   - 顺序调用：
@@ -45,7 +52,7 @@
 
 - `POST /templates/official/upload`
   - 官方模板上传入口
-  - 上传后立即完成分析、DeepSeek 模板生成和 `register_template.py --kind deck`
+  - 上传后立即完成分析、LLM 模板生成和 `register_template.py --kind deck`
   - 成功后写入 `templates/decks/<template_id>/` 并更新 `decks_index.json`
 
 - `POST /templates/official/{template_id}/create`
@@ -87,16 +94,35 @@
 pip install -r requirements.txt
 ```
 
+根目录 `requirements.txt` 包含 outer service 自己的运行时依赖，
+其中 `python-multipart` 是必需项。它被 FastAPI 的模板上传接口
+（`/templates/upload`、`/templates/official/upload`）在应用导入阶段
+直接检查；缺失时，`uvicorn app:app` 会在启动前抛出
+`Form data requires "python-multipart" to be installed`。
+
 ## 配置
 
-### 1. 外层服务自己的配置
+### 推荐：统一放在根目录一个配置文件里
 
-可放在当前目录 `.env` 或系统环境变量里：
+推荐直接使用当前仓库根目录的 `agent.env`（或本地开发时使用 `.env`）。
+现在外层 `app.py` 和它拉起的 `ppt-master` 子进程都会读取这一份根配置：
 
 ```bash
-DEEPSEEK_API_KEY=your_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
+LLM_PROVIDER=deepseek
+LLM_API_KEY=your_key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-v4-pro
+
+# 兼容旧配置名，仍然可用：
+# DEEPSEEK_API_KEY=your_key
+# DEEPSEEK_BASE_URL=https://api.deepseek.com
+# DEEPSEEK_MODEL=deepseek-v4-pro
+
+# MiniMax M3 示例：
+# LLM_PROVIDER=minimax
+# LLM_API_KEY=your_key
+# LLM_BASE_URL=https://api.minimaxi.com/v1
+# LLM_MODEL=MiniMax-M3
 
 # 可选：手动指定 ppt-master 脚本使用的 Python 解释器（见下方说明）
 # PPTMASTER_PYTHON_BIN=/Users/you/.local/bin/python3.12
@@ -104,7 +130,9 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 
 说明：
 
-- `DEEPSEEK_*` 只给外层 `/agent-plan` 用
+- `LLM_*` 供外层 `/agent-plan`、`/strategist`、`/generate-svgs` 和模板分析链路使用
+- `IMAGE_BACKEND` 及各家 `*_API_KEY` / `*_MODEL` / `*_BASE_URL` 会透传给内层 `ppt-master` 脚本（如 `image_gen.py`）
+- `DEEPSEEK_*` 仍然兼容，但只是 legacy fallback
 - `PPTMASTER_PYTHON_BIN`（可选）用来指定运行 `ppt-master` 脚本的 Python 解释器。**这是宿主开发环境的常见坑**：项目内 `./.venv` 通常是 outer service 自身的 Python（fastapi / openai 装在那里），如果它是 3.9，而 `ppt-master` 脚本用了 PEP 604 的 `X | None` 类型联合语法（需要 3.10+），所有子进程调用（`/prepare`、`/generate-image`、`/export` …）都会以 `TypeError: unsupported operand type(s) for |` 失败并返回 500。务必把它指向一个 3.10+ 的解释器；留空则按以下顺序自动选择：
   1. `PPTMASTER_PYTHON_BIN`（本变量）
   2. `./.venv/bin/python`
@@ -113,12 +141,13 @@ DEEPSEEK_MODEL=deepseek-v4-pro
   5. `./ppt-master/venv/bin/python`
   6. `python3.12` / `python3` / `python` 在 `PATH` 上
 
-### 2. `ppt-master` 自己的配置
-
-放在：
+例如 MiniMax 生图：
 
 ```bash
-ppt-master/.env
+IMAGE_BACKEND=minimax
+MINIMAX_API_KEY=your_key
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+MINIMAX_MODEL=image-01
 ```
 
 例如 Agnes：
@@ -130,7 +159,11 @@ AGNES_MODEL=agnes-image-2.1-flash
 AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 ```
 
-外层服务不会再维护第二套 Agnes 配置。
+### 兼容回退：`ppt-master/.env`
+
+如果根目录 `agent.env` / `.env` 里没有提供某些生图变量，内层 `ppt-master`
+脚本仍然会按它自己的机制回退到 `ppt-master/.env`。但从维护角度，建议把
+LLM 和生图配置都统一放在根目录这一份文件里，避免本地开发和 Docker 的行为不一致。
 
 ## 启动
 
@@ -142,6 +175,8 @@ uvicorn app:app --reload --port 8000
 ```
 
 打开 [http://127.0.0.1:8000/](http://127.0.0.1:8000/) 即可使用。
+如果启动阶段直接因 multipart 报错退出，优先检查当前运行该命令的
+Python 环境是否真的安装了根目录 `requirements.txt`。
 
 ### Docker 部署
 
@@ -150,7 +185,7 @@ uvicorn app:app --reload --port 8000
 挂到名为 `agent-state` 的 named volume，rebuild 不丢任务。
 
 ```bash
-cp agent.env.example agent.env       # 填入真实 key（DeepSeek + image backend）
+cp agent.env.example agent.env       # 填入真实 key（LLM + image backend）
 docker compose up --build -d
 docker compose logs -f backend
 open http://127.0.0.1:8080/
@@ -196,7 +231,7 @@ curl -X POST http://127.0.0.1:8000/tasks/prepare \
   }'
 ```
 
-### 2. 让外层 DeepSeek 给出下一步编排建议
+### 2. 让外层 LLM 给出下一步编排建议
 
 ```bash
 curl -X POST http://127.0.0.1:8000/tasks/TASK_ID/agent-plan \
@@ -236,7 +271,25 @@ curl -X POST http://127.0.0.1:8000/tasks/TASK_ID/generate-image \
   }'
 ```
 
-### 4. 导出 PPT
+### 4. 让后端自动补齐前置步骤并导出 PPT
+
+```bash
+curl -X POST http://127.0.0.1:8000/tasks/TASK_ID/run-pipeline \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "repo_dir": "/absolute/path/to/ppt-master",
+    "task_id": "TASK_ID",
+    "strategist_model": "deepseek-v4-pro",
+    "svg_model": "deepseek-v4-pro",
+    "max_pages": 30
+  }'
+```
+
+如果你已经手动完成了 `design_spec.md`、`spec_lock.md` 和 `svg_output/*.svg`，
+仍然可以继续直接调用 `/export`。但在普通产品链路里，优先推荐
+`/run-pipeline`，由后端兜底依赖关系。
+
+### 5. 仅在需要时直接导出 PPT
 
 ```bash
 curl -X POST http://127.0.0.1:8000/tasks/TASK_ID/export \
@@ -247,7 +300,7 @@ curl -X POST http://127.0.0.1:8000/tasks/TASK_ID/export \
   }'
 ```
 
-### 5. 查看产物
+### 6. 查看产物
 
 ```bash
 curl "http://127.0.0.1:8000/tasks/TASK_ID/artifacts?repo_dir=/absolute/path/to/ppt-master"

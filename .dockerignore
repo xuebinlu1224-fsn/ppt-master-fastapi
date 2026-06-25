@@ -2,6 +2,8 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+**/__pycache__/
+**/*.pyc
 .git
 .gitignore
 .gitattributes
@@ -23,24 +25,32 @@ projects
 # Inner ppt-master git internals + dev caches.
 ppt-master/.git
 ppt-master/.github
+ppt-master/.claude-plugin
 ppt-master/.pytest_cache
-ppt-master/.pycache
-ppt-master/__pycache__
-ppt-master/skills/ppt-master/scripts/__pycache__
-ppt-master/skills/ppt-master/scripts/*/__pycache__
+ppt-master/.mypy_cache
+ppt-master/.ruff_cache
+ppt-master/.cache
+ppt-master/.DS_Store
+ppt-master/projects
+ppt-master/projects/**
 ppt-master/skills/ppt-master/projects
+ppt-master/skills/ppt-master/projects/**
 ppt-master/skills/ppt-master/test-data
+ppt-master/skills/ppt-master/test-data/**
 
-# Markdown noise we don't need in the image.
-*.md
-README.md
-AGENTS.md
-README_CN.md
-CONTRIBUTING.md
-CODE_OF_CONDUCT.md
-SECURITY.md
-LICENSE
-docs/
+# Top-level repo docs we do not need in the image. Keep skill/template markdown.
+/README.md
+/AGENTS.md
+/ARCHITECTURE.md
+/ppt-master/README.md
+/ppt-master/README_CN.md
+/ppt-master/AGENTS.md
+/ppt-master/CLAUDE.md
+/ppt-master/CONTRIBUTING.md
+/ppt-master/CODE_OF_CONDUCT.md
+/ppt-master/SECURITY.md
+/ppt-master/LICENSE
+/ppt-master/docs/
 
 # Editor / IDE.
 .vscode
